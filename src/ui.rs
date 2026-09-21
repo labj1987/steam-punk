@@ -192,22 +192,22 @@ pub fn build_ui(app: &Application) {
                     picture.set_valign(Align::Center);
                     picture.add_css_class("card");
                     row.add_prefix(&picture);
-                } else if let Some(appid) = trainer.appid {
-                    // Name resolved but cover art didn't — a one-shot
-                    // fetch_and_cache retry earlier only tries once, ever
-                    // (see gamedata::fetch_and_cache), so a transient
-                    // failure (or an AppID whose guessed CDN paths both
-                    // 404 — confirmed live for some current-gen games)
-                    // otherwise leaves it permanently missing. Retry once
-                    // per AppID per session here instead.
-                    if trainer.game_name.is_some()
+                }
+                // A name or cover that's still missing — the initial fetch
+                // failed (e.g. imported offline), or an AppID whose guessed
+                // CDN paths both 404 (confirmed live for some current-gen
+                // games) — would otherwise stay missing forever, since
+                // fetch_and_cache only runs at association time. Retry once
+                // per AppID per session whenever either is absent.
+                if let Some(appid) = trainer.appid {
+                    if (trainer.game_name.is_none() || trainer.cover_path.is_none())
                         && cover_retry_attempted.borrow_mut().insert(appid)
                     {
                         let refresh = self_slot.clone();
                         spawn_async(gamedata::fetch_and_cache(appid), move |result| {
                             if let Err(e) = result {
                                 applog::log(&format!(
-                                    "gamedata: cover retry failed for AppID {appid}: {e}"
+                                    "gamedata: name/cover retry failed for AppID {appid}: {e}"
                                 ));
                             }
                             if let Some(reload) = refresh.borrow().clone() {
@@ -710,10 +710,28 @@ fn prompt_appid_for_queue(
         })
     };
 
+    // Debounce: only search once typing has paused for 250ms, so a burst of
+    // keystrokes produces one request instead of one per key.
     {
         let run_search = run_search.clone();
+        let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
         search_entry.connect_search_changed(move |entry| {
-            run_search(entry.text().to_string());
+            if let Some(id) = pending.borrow_mut().take() {
+                id.remove();
+            }
+            let term = entry.text().to_string();
+            let run_search = run_search.clone();
+            let slot = pending.clone();
+            let id = glib::timeout_add_local_once(
+                std::time::Duration::from_millis(250),
+                move || {
+                    // The source is spent once it fires; forget its id so a
+                    // later keystroke doesn't try to remove it.
+                    slot.borrow_mut().take();
+                    run_search(term);
+                },
+            );
+            *pending.borrow_mut() = Some(id);
         });
     }
     {

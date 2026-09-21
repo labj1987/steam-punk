@@ -5,7 +5,26 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Upper bound on a downloaded image, so a wrong/huge response can't be
+/// cached or held in memory.
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// One HTTP client shared by every request (connection pooling, one TLS
+/// setup) instead of building a new one per call.
+fn http_client() -> Result<reqwest::Client> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Ok(c.clone());
+    }
+    let built = reqwest::Client::builder()
+        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    Ok(CLIENT.get_or_init(|| built).clone())
+}
 
 fn cache_dir() -> Result<PathBuf> {
     Ok(crate::library::data_dir()?.join("cache"))
@@ -49,10 +68,7 @@ pub async fn fetch_and_cache(appid: u32) -> Result<()> {
     let dir = cache_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    let client = reqwest::Client::builder()
-        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = http_client()?;
 
     let details = fetch_appdetails(&client, appid).await?;
     std::fs::write(name_cache_path(appid)?, &details.name)
@@ -141,7 +157,22 @@ pub(crate) async fn download_image(client: &reqwest::Client, url: &str) -> Resul
         .with_context(|| format!("requesting {url}"))?
         .error_for_status()
         .with_context(|| format!("{url} returned an error status"))?;
-    Ok(resp.bytes().await?.to_vec())
+    let is_image = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().to_ascii_lowercase().starts_with("image/"));
+    if !is_image {
+        anyhow::bail!("{url} did not return an image (wrong Content-Type)");
+    }
+    if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES as u64) {
+        anyhow::bail!("{url} image is larger than {MAX_IMAGE_BYTES} bytes");
+    }
+    let bytes = resp.bytes().await?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!("{url} image is larger than {MAX_IMAGE_BYTES} bytes");
+    }
+    Ok(bytes.to_vec())
 }
 
 /// Minimal percent-encoding for a query-string value. `reqwest`'s own
@@ -179,10 +210,7 @@ const MAX_SEARCH_RESULTS: usize = 8;
 /// `fetch_and_cache`'s image fetch, since there's no long-lived client to
 /// share across a UI-triggered one-off call.
 pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = http_client()?;
     download_image(&client, url).await
 }
 
@@ -197,10 +225,7 @@ pub async fn search(term: &str) -> Result<Vec<SearchResult>> {
         return Ok(Vec::new());
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = http_client()?;
 
     let url = format!(
         "https://store.steampowered.com/api/storesearch/?term={}&cc=us&l=en",
