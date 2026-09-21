@@ -1,4 +1,4 @@
-# SteamPunk
+# Steam Punk
 
 GTK4 + libadwaita desktop app for launching Windows game-trainer executables
 (e.g. FLiNG trainers) through Proton against a currently running Steam

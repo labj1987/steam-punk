@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>io.github.labj1987.SteamPunk</id>
-  <name>SteamPunk</name>
+  <name>Steam Punk</name>
   <summary>Launch Windows game trainers through Proton against a running Steam game</summary>
   <metadata_license>MIT</metadata_license>
   <project_license>AGPL-3.0-or-later</project_license>
@@ -17,7 +17,7 @@
   <launchable type="desktop-id">steampunk.desktop</launchable>
   <url type="homepage">https://github.com/labj1987/SteamPunk</url>
   <developer id="io.github.labj1987">
-    <name>Alex Brown</name>
+    <name>Linnard Alex Brown Jr.</name>
   </developer>
   <provides>
     <binary>steampunk</binary>

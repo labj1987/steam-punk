@@ -2,7 +2,7 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
 <policyconfig>
-  <vendor>SteamPunk</vendor>
+  <vendor>Steam Punk</vendor>
   <action id="io.github.labj1987.SteamPunk.setup">
     <description>Install system packages needed for wine .NET support</description>
     <message>Authentication is required to install the Windows compatibility component</message>

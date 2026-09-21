@@ -56,7 +56,7 @@ where
 pub fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("SteamPunk")
+        .title("Steam Punk")
         .default_width(480)
         .default_height(560)
         .build();
@@ -479,8 +479,9 @@ pub fn build_ui(app: &Application) {
         let window = window.clone();
         about_btn.connect_clicked(move |_| {
             let dialog = AboutDialog::builder()
-                .application_name("SteamPunk")
+                .application_name("Steam Punk")
                 .version(env!("CARGO_PKG_VERSION"))
+                .license_type(gtk4::License::Agpl30)
                 .developers(vec!["Linnard Alex Brown Jr."])
                 .comments(
                     "Launches Windows game trainers through Proton against a running \
@@ -581,7 +582,9 @@ fn prompt_appid_for_queue(
     };
 
     let dialog = AdwDialog::builder()
-        .title(format!("Add Steam AppID for \u{201c}{}\u{201d}?", esc(&filename)))
+        // AdwDialog titles are plain text, not markup — escaping here would
+        // show a literal "&amp;" for a filename containing "&".
+        .title(format!("Add Steam AppID for \u{201c}{filename}\u{201d}?"))
         .content_width(420)
         .content_height(480)
         .build();
@@ -902,7 +905,9 @@ fn show_game_picker(
         .build();
 
     for (i, game) in games.iter().enumerate() {
-        dialog.add_response(&i.to_string(), &game.name);
+        // Response labels treat `_` as a mnemonic marker; a literal
+        // underscore in a game name has to be doubled.
+        dialog.add_response(&i.to_string(), &game.name.replace('_', "__"));
     }
     dialog.add_response("cancel", "Cancel");
     dialog.set_close_response("cancel");

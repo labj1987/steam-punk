@@ -3,7 +3,7 @@ name = "steampunk"
 version = "0.4.7"
 edition = "2021"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
-authors = ["Alex Brown"]
+authors = ["Linnard Alex Brown Jr."]
 license = "AGPL-3.0-or-later"
 
 [[bin]]
