@@ -300,22 +300,60 @@ pub fn build_ui(app: &Application) {
     {
         let running = running.clone();
         let refresh_list = refresh_list.clone();
+        // The /proc scan runs on a blocking thread, never the GTK thread; the
+        // flag keeps a slow scan from stacking up overlapping ones.
+        let in_flight = Rc::new(std::cell::Cell::new(false));
         glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
-            let exited: Vec<std::path::PathBuf> = running
+            if in_flight.get() {
+                return glib::ControlFlow::Continue;
+            }
+            let tracked: Vec<(std::path::PathBuf, u32)> = running
                 .borrow()
                 .iter()
-                .filter(|(_, &pgid)| pgid != 0 && !launcher::process_group_alive(pgid))
-                .map(|(path, _)| path.clone())
+                .filter(|(_, &pgid)| pgid != 0)
+                .map(|(path, &pgid)| (path.clone(), pgid))
                 .collect();
-            if !exited.is_empty() {
-                let mut r = running.borrow_mut();
-                for path in &exited {
-                    applog::log(&format!("UI: trainer at {} exited on its own", path.display()));
-                    r.remove(path);
-                }
-                drop(r);
-                refresh_list();
+            if tracked.is_empty() {
+                return glib::ControlFlow::Continue;
             }
+            in_flight.set(true);
+            let running = running.clone();
+            let refresh_list = refresh_list.clone();
+            let in_flight = in_flight.clone();
+            spawn_async(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        tracked
+                            .into_iter()
+                            .filter(|(_, pgid)| !launcher::process_group_alive(*pgid))
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                },
+                move |result| {
+                    in_flight.set(false);
+                    let Ok(exited) = result else { return };
+                    let mut changed = false;
+                    {
+                        let mut r = running.borrow_mut();
+                        for (path, pgid) in &exited {
+                            // Only if it's still the same launch (not stopped
+                            // and relaunched while the scan ran).
+                            if r.get(path) == Some(pgid) {
+                                applog::log(&format!(
+                                    "UI: trainer at {} exited on its own",
+                                    path.display()
+                                ));
+                                r.remove(path);
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        refresh_list();
+                    }
+                },
+            );
             glib::ControlFlow::Continue
         });
     }
@@ -938,11 +976,29 @@ fn wire_launch_button(
                 let trainer = trainer.clone();
                 let toasts = dialog_toasts.clone();
                 let guard = guard.clone();
-                if !launcher::has_usable_dotnet(&target) {
-                    show_dotnet_dialog(&dialog_window, target, trainer, toasts, running.clone(), refresh_slot.clone(), guard);
-                    return;
-                }
-                launch_trainer_now(target, trainer, toasts, running.clone(), refresh_slot.clone(), guard);
+                let running = running.clone();
+                let refresh_slot = refresh_slot.clone();
+                let dialog_window = dialog_window.clone();
+                // has_usable_dotnet parses the prefix's whole system.reg
+                // (several MB) — keep it off the GTK thread.
+                spawn_async(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let usable = launcher::has_usable_dotnet(&target);
+                            (target, usable)
+                        })
+                        .await
+                    },
+                    move |result| match result {
+                        Ok((target, true)) => {
+                            launch_trainer_now(target, trainer, toasts, running, refresh_slot, guard)
+                        }
+                        Ok((target, false)) => show_dotnet_dialog(
+                            &dialog_window, target, trainer, toasts, running, refresh_slot, guard,
+                        ),
+                        Err(e) => toasts.add_toast(Toast::new(&format!("Task error: {e}"))),
+                    },
+                );
             }),
         );
     });
