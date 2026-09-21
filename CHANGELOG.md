@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.8 — 2026-09-21
+
+- The app is now displayed as "Steam Punk" (About dialog, window title, desktop
+  entry, appdata). Internal identifiers are unchanged. Credits use the full
+  name, and the About dialog now shows the AGPL-3.0 license.
+- Fixed re-importing a trainer that is already in the library truncating it to
+  zero bytes; imports are now copied atomically (temp file, then rename).
+  Trainers with an uppercase `.EXE` extension now show up in the list.
+- Fixed Stop All killing unrelated processes (it used `pkill -f` with the
+  trainers path as a regex); it now stops only the tracked process groups.
+- Fixed the Proton-dir fallback misfiring on library paths containing
+  "proton"; it now splits on the `/files/` marker.
+- Fixed a fast double-click on Launch orphaning an untracked process.
+- Cover art: retry a missing name or cover in later sessions, reject
+  non-image or oversized responses before caching, debounce store search, and
+  share one HTTP client.
+- The .NET check and the running-trainer poll no longer run on the GTK thread.
+- Packaging: automatic setup is only offered where `apt-get` exists; AppRun
+  installs the privileged script via a checksum-verified root-owned copy;
+  polkit auth is no longer cached (`auth_admin`); build script fixes (apt
+  ordering, live appimagetool cache, optional checksum pin). README notes the
+  libadwaita >= 1.5 requirement.
+- CI: the release workflow now checks the tag against `Cargo.toml` and runs
+  `cargo test`; appdata release list filled in and generated at build time;
+  tokio features narrowed; docs corrected (`runinprefix`, .NET 4.6.2, prefix
+  modification); the temporary `.reg` file is deleted after import.
+
 ## 0.4.7 — 2026-09-17
 
 - Fixed the .NET repair still failing on any prefix it had already tried once.
