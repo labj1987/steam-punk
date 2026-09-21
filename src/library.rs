@@ -115,7 +115,7 @@ pub fn list_trainers() -> Result<Vec<Trainer>> {
     let mut trainers: Vec<Trainer> = std::fs::read_dir(&dir)?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("exe"))
+        .filter(|p| p.is_file() && p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("exe")))
         .map(|path| {
             let filename = path
                 .file_name()
@@ -162,8 +162,25 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
         .file_name()
         .context("dropped file has no filename")?;
     let dest = dir.join(filename);
-    std::fs::copy(src, &dest)
-        .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+
+    // Re-importing a file that already is the library copy: copying onto
+    // itself would truncate it to zero bytes, so do nothing.
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(src), std::fs::canonicalize(&dest)) {
+        if a == b {
+            return Ok(dest);
+        }
+    }
+
+    // Copy to a temp name and rename into place so an interrupted copy
+    // never leaves a corrupt trainer behind.
+    let mut tmp_name = dest.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    if let Err(e) = std::fs::copy(src, &tmp).and_then(|_| std::fs::rename(&tmp, &dest)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e)
+            .context(format!("copying {} to {}", src.display(), dest.display())));
+    }
     Ok(dest)
 }
 
