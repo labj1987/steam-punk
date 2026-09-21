@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# build-appimage.sh — build the SteamPunk AppImage.
+# build-appimage.sh — build the Steam Punk AppImage.
 # Run from the repo root on Ubuntu (CI uses ubuntu-latest). Run as root in CI.
 set -euo pipefail
 
-APP="steampunk"
+APP="steam-punk"
 # Single source of truth: the version in Cargo.toml
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 ARCH="x86_64"
@@ -73,7 +73,7 @@ cp data/$APP-256.png "$APPDIR/$APP.png"
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
-APP="steampunk"
+APP="steam-punk"
 
 SRC_SCRIPT="$HERE/usr/lib/$APP/privileged-setup.sh"
 SRC_POLICY="$HERE/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"
@@ -102,7 +102,7 @@ if [[ $needs_install -eq 1 ]]; then
             cat "$alt" > "$tmp" || { rm -f "$tmp"; return 1; }
         fi
         if [[ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$sum" ]]; then
-            echo "steampunk: checksum mismatch for $dst, refusing to install" >&2
+            echo "steam-punk: checksum mismatch for $dst, refusing to install" >&2
             rm -f "$tmp"
             return 1
         fi
@@ -125,7 +125,7 @@ if [[ $needs_install -eq 1 ]]; then
 fi
 
 export PATH="$HERE/usr/bin:$PATH"
-exec "$HERE/usr/bin/steampunk" "$@"
+exec "$HERE/usr/bin/steam-punk" "$@"
 APPRUN
 chmod 755 "$APPDIR/AppRun"
 
@@ -161,7 +161,7 @@ fi
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
 
-UPDATE_INFORMATION="gh-releases-zsync|labj1987|SteamPunk|latest|steampunk-*-x86_64.AppImage.zsync"
+UPDATE_INFORMATION="gh-releases-zsync|labj1987|steam-punk|latest|steam-punk-*-x86_64.AppImage.zsync"
 VERSION="$VERSION" ARCH="$ARCH" "$TOOL" --appimage-extract-and-run \
     -u "$UPDATE_INFORMATION" "$APPDIR" "$OUT"
 
@@ -177,4 +177,16 @@ if zsyncmake "$OUT"; then
     echo "==> .zsync generated: $OUT.zsync"
 else
     echo "==> WARNING: zsyncmake failed — continuing without .zsync"
+fi
+
+# Back-compat: installs made before the steampunk -> steam-punk rename embed
+# the old update pattern (steampunk-*-x86_64.AppImage.zsync). Publish an
+# identical copy under the legacy name so they can still self-update once;
+# the copy carries the new UPDATE_INFORMATION, so later updates use new names.
+LEGACY_OUT="steampunk-$VERSION-$ARCH.AppImage"
+cp "$OUT" "$LEGACY_OUT"
+if zsyncmake "$LEGACY_OUT"; then
+    echo "==> legacy-name copy + .zsync generated: $LEGACY_OUT"
+else
+    echo "==> WARNING: zsyncmake failed for legacy copy"
 fi

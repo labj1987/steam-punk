@@ -836,7 +836,7 @@ mod tests {
     impl Scratch {
         fn new(tag: &str) -> Self {
             let p = std::env::temp_dir().join(format!(
-                "steampunk-test-{tag}-{}-{:?}",
+                "steam-punk-test-{tag}-{}-{:?}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1012,10 +1012,10 @@ mod tests {
     fn live_launch_track_and_stop_a_real_trainer() {
         let target = resolve_launch_target(1547000).expect("resolve_launch_target(GTA SA)");
         let trainer_path = PathBuf::from(std::env::var("HOME").unwrap())
-            .join(".local/share/steampunk/trainers")
+            .join(".local/share/steam-punk/trainers")
             .join("Grand Theft Auto San Andreas The Definitive Edition v1.0-v1.0.8.11827 Plus 49 Trainer.exe");
         assert!(trainer_path.is_file(), "test trainer not found at {trainer_path:?}");
-        let log_path = PathBuf::from("/tmp/steampunk-live-test.log");
+        let log_path = PathBuf::from("/tmp/steam-punk-live-test.log");
 
         let pgid = launch_trainer(&target, &trainer_path, &log_path).expect("launch_trainer");
         println!("launched, pgid={pgid}");

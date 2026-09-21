@@ -2,7 +2,7 @@
 
 GTK4 + libadwaita desktop app for launching Windows game-trainer executables
 (e.g. FLiNG trainers) through Proton against a currently running Steam
-game's wine session, on Linux. (Formerly known as proton-trainer.)
+game's wine session, on Linux. (Formerly known as proton-trainer, then SteamPunk.)
 
 ## Screenshot
 
@@ -61,7 +61,9 @@ the manual commands to run instead.
 ./build-appimage.sh
 ```
 
-Produces `steampunk-<version>-x86_64.AppImage` (+ `.zsync` sidecar).
+Produces `steam-punk-<version>-x86_64.AppImage` (+ `.zsync` sidecar). Releases
+also carry a legacy-named `steampunk-<version>-x86_64.AppImage` copy so installs
+made before the rename can still self-update.
 
 ## Non-goals
 

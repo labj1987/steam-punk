@@ -5,9 +5,9 @@
 
 set -uo pipefail
 
-LOGFILE="/var/log/steampunk.log"
+LOGFILE="/var/log/steam-punk.log"
 log() {
-    local msg="[steampunk] $*"
+    local msg="[steam-punk] $*"
     echo "$msg"
     echo "$(date '+%Y-%m-%d %H:%M:%S') $msg" >> "$LOGFILE" 2>/dev/null || true
 }

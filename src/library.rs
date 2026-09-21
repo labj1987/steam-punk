@@ -79,26 +79,63 @@ pub fn set_trainer_appid(filename: &str, appid: u32) -> Result<()> {
     save_meta(&meta)
 }
 
-/// `~/.local/share/steampunk/` — the app's data dir (trainers, logs,
+/// `~/.local/share/steam-punk/` — the app's data dir (trainers, logs,
 /// trainer metadata, cover-art cache).
 pub fn data_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".local/share/steampunk"))
+    Ok(PathBuf::from(home).join(".local/share/steam-punk"))
 }
 
-/// One-time move of the pre-rename data dir (`~/.local/share/proton-trainer`)
-/// to the new location, so existing imported trainers survive the rebrand.
-/// Must run before anything (applog included) touches the data dir.
+/// Pre-rename data dirs, oldest first (`proton-trainer` -> `steampunk` ->
+/// `steam-punk`), relative to `~/.local/share`.
+const LEGACY_DATA_DIRS: [&str; 2] = ["proton-trainer", "steampunk"];
+
+/// One-time move of any pre-rename data dir into `~/.local/share/steam-punk`,
+/// so existing imported trainers survive the rebrands. Must run before
+/// anything (applog included) touches the data dir.
 pub fn migrate_legacy_data_dir() {
-    let Ok(new_dir) = data_dir() else { return };
     let Ok(home) = std::env::var("HOME") else { return };
-    let old_dir = PathBuf::from(home).join(".local/share/proton-trainer");
-    if old_dir.is_dir() && !new_dir.exists() {
-        let _ = std::fs::rename(&old_dir, &new_dir);
+    migrate_legacy_data_dir_in(&PathBuf::from(home).join(".local/share"));
+}
+
+fn migrate_legacy_data_dir_in(share: &std::path::Path) {
+    let new_dir = share.join("steam-punk");
+    for legacy in LEGACY_DATA_DIRS {
+        let old_dir = share.join(legacy);
+        // A symlink here is our own back-compat link from a previous
+        // migration, not data.
+        let is_real_dir = old_dir
+            .symlink_metadata()
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if !is_real_dir {
+            continue;
+        }
+        if !new_dir.exists() {
+            if std::fs::rename(&old_dir, &new_dir).is_err() {
+                continue;
+            }
+        } else if let Ok(entries) = std::fs::read_dir(&old_dir) {
+            // Both exist (e.g. an older build ran after a migration): fold
+            // in anything the new dir lacks, never overwrite.
+            for e in entries.flatten() {
+                let dest = new_dir.join(e.file_name());
+                if !dest.exists() {
+                    let _ = std::fs::rename(e.path(), dest);
+                }
+            }
+            if std::fs::remove_dir(&old_dir).is_err() {
+                continue; // leftovers stay put; nothing is lost
+            }
+        } else {
+            continue;
+        }
+        // Keep the old path resolving (e.g. for a not-yet-updated AppImage).
+        let _ = std::os::unix::fs::symlink(&new_dir, &old_dir);
     }
 }
 
-/// `~/.local/share/steampunk/trainers/` — where imported trainers live,
+/// `~/.local/share/steam-punk/trainers/` — where imported trainers live,
 /// flat, no per-game folders.
 pub fn trainers_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("trainers"))
@@ -196,4 +233,44 @@ pub fn remove_trainer(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::migrate_legacy_data_dir_in;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("steam-punk-mig-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn moves_legacy_dir_and_leaves_symlink() {
+        let share = tmp("move");
+        std::fs::create_dir_all(share.join("steampunk/trainers")).unwrap();
+        std::fs::write(share.join("steampunk/trainers/a.exe"), "x").unwrap();
+        migrate_legacy_data_dir_in(&share);
+        assert!(share.join("steam-punk/trainers/a.exe").is_file());
+        assert!(share.join("steampunk").symlink_metadata().unwrap().file_type().is_symlink());
+        // idempotent
+        migrate_legacy_data_dir_in(&share);
+        assert!(share.join("steam-punk/trainers/a.exe").is_file());
+        let _ = std::fs::remove_dir_all(&share);
+    }
+
+    #[test]
+    fn merges_when_both_exist_without_overwriting() {
+        let share = tmp("merge");
+        std::fs::create_dir_all(share.join("steam-punk")).unwrap();
+        std::fs::create_dir_all(share.join("steampunk")).unwrap();
+        std::fs::write(share.join("steam-punk/keep"), "new").unwrap();
+        std::fs::write(share.join("steampunk/keep"), "old").unwrap();
+        std::fs::write(share.join("steampunk/extra"), "e").unwrap();
+        migrate_legacy_data_dir_in(&share);
+        assert_eq!(std::fs::read_to_string(share.join("steam-punk/keep")).unwrap(), "new");
+        assert!(share.join("steam-punk/extra").is_file());
+        let _ = std::fs::remove_dir_all(&share);
+    }
 }

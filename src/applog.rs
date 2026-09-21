@@ -17,7 +17,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn log_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/share/steampunk/steampunk.log")
+    PathBuf::from(home).join(".local/share/steam-punk/steam-punk.log")
 }
 
 /// Starts a fresh log for this run — truncated rather than appended forever,
@@ -30,7 +30,7 @@ pub fn init() {
     }
     let _ = std::fs::write(&path, "");
     log(&format!(
-        "SteamPunk v{} starting (timestamps below are UTC)",
+        "Steam Punk v{} starting (timestamps below are UTC)",
         env!("CARGO_PKG_VERSION")
     ));
 }
@@ -48,7 +48,7 @@ pub fn log(msg: &str) {
 /// latter since a normal user may not have read access to it.
 pub fn export_to(dest: &std::path::Path) -> anyhow::Result<()> {
     let mut out = String::new();
-    out.push_str("==== SteamPunk app log ====\n");
+    out.push_str("==== Steam Punk app log ====\n");
     match std::fs::read_to_string(log_path()) {
         Ok(s) => out.push_str(&s),
         Err(e) => out.push_str(&format!("(could not read: {e})\n")),

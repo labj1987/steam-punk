@@ -10,8 +10,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-const SCRIPT: &str = "/usr/lib/steampunk/privileged-setup.sh";
-pub const LOGFILE: &str = "/var/log/steampunk.log";
+const SCRIPT: &str = "/usr/lib/steam-punk/privileged-setup.sh";
+pub const LOGFILE: &str = "/var/log/steam-punk.log";
 
 /// True on Debian-family systems: `privileged-setup.sh` is apt-only, so the
 /// automatic system setup is only offered where `apt-get` exists.
@@ -122,7 +122,7 @@ fn append_to_log(stdout: &[u8], stderr: &[u8]) {
     else {
         return;
     };
-    let _ = writeln!(f, "[steampunk] ==== winetricks dotnet48 output ====");
+    let _ = writeln!(f, "[steam-punk] ==== winetricks dotnet48 output ====");
     let _ = f.write_all(stdout);
     let _ = f.write_all(stderr);
 }

@@ -20,7 +20,7 @@ fn http_client() -> Result<reqwest::Client> {
         return Ok(c.clone());
     }
     let built = reqwest::Client::builder()
-        .user_agent("steampunk (https://github.com/labj1987/SteamPunk)")
+        .user_agent("steam-punk (https://github.com/labj1987/steam-punk)")
         .timeout(Duration::from_secs(10))
         .build()?;
     Ok(CLIENT.get_or_init(|| built).clone())

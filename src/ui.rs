@@ -504,7 +504,7 @@ pub fn build_ui(app: &Application) {
         save_log_btn.connect_clicked(move |_| {
             let dialog = FileDialog::builder()
                 .title("Save Debug Log")
-                .initial_name(format!("steampunk-log-{}.txt", applog::filename_timestamp()))
+                .initial_name(format!("steam-punk-log-{}.txt", applog::filename_timestamp()))
                 .build();
 
             let toast_overlay = toast_overlay.clone();
@@ -1197,7 +1197,7 @@ commands below yourself, then launch the trainer again."
 /// winetricks install) off the main thread, then auto-launches the trainer
 /// on success. Errors from either phase surface via a toast with the real
 /// error message; the setup script and install_dotnet48 both also log to
-/// /var/log/steampunk.log.
+/// /var/log/steam-punk.log.
 fn run_automatic_setup(
     target: LaunchTarget,
     trainer: Trainer,

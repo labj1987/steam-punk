@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.9 — 2026-09-21
+
+- Renamed to the hyphenated `steam-punk` convention: binary, crate, GitHub
+  repo, AppImage filename, desktop entry and icons, data dir
+  (`~/.local/share/steam-punk`), setup script dir (`/usr/lib/steam-punk`) and
+  log (`/var/log/steam-punk.log`). The app ID and polkit action ids are
+  unchanged.
+- Existing `~/.local/share/steampunk` (and `proton-trainer`) data is migrated
+  automatically at startup; a symlink is left at the old path.
+- Releases also publish a legacy-named `steampunk-*` AppImage copy so older
+  installs can still self-update once.
+
 ## 0.4.8 — 2026-09-21
 
 - The app is now displayed as "Steam Punk" (About dialog, window title, desktop

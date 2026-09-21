@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=Steam Punk
 Comment=Launch Windows game trainers through Proton against a running Steam game
-Exec=steampunk
-Icon=steampunk
+Exec=steam-punk
+Icon=steam-punk
 Terminal=false
 Type=Application
 Categories=Game;Utility;

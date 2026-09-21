@@ -1,4 +1,14 @@
-# SteamPunk (formerly proton-trainer)
+# Steam Punk (formerly proton-trainer / SteamPunk)
+
+## Naming convention
+
+Decided by the user: the display name is "Steam Punk". The binary, Cargo
+crate, GitHub repo, AppImage filename, `.desktop` and icon filenames, data
+dir and log files all use hyphenated lowercase `steam-punk`. The app ID
+`io.github.labj1987.SteamPunk` and the polkit action ids stay UNCHANGED
+(PascalCase) — never rename them. Old names (`steampunk`, `proton-trainer`)
+appear only in deliberate back-compat/migration code (data-dir migration,
+the legacy-named AppImage copy) — don't add new uses.
 
 GTK4 + libadwaita desktop app, written in Rust, for launching Windows
 game-trainer executables (e.g. FLiNG trainers) through Proton directly
@@ -70,10 +80,12 @@ with a name and no art is still strictly better than falling back to the
 filename. `cached_name`/`cached_cover` never hit the network; a cache miss
 just means the caller falls back to the trainer's filename-derived title.
 
-**The proton-trainer→steampunk data migration.** `library::
-migrate_legacy_data_dir` does a one-time rename of
-`~/.local/share/proton-trainer` to `~/.local/share/steampunk` on first run
-of the rebranded app, so existing imported trainers and logs survive. It
+**The data-dir migration (proton-trainer/steampunk → steam-punk).**
+`library::migrate_legacy_data_dir` renames `~/.local/share/proton-trainer`
+and/or `~/.local/share/steampunk` to `~/.local/share/steam-punk` on first
+run (merging without overwriting if both exist, and leaving a symlink at the
+old `steampunk` path for not-yet-updated AppImages), so existing imported
+trainers and logs survive. It
 must run before anything else (including `applog`) touches the data dir —
 called first thing in `main.rs`. The `proton-trainer-dotnet.reg` temp
 filename in `launcher.rs` is unrelated and intentionally left as-is (a
@@ -93,8 +105,10 @@ as GreenLight/KernelPop:
    desktop file, icon, generated `AppRun`).
 4. Downloads `appimagetool` (cached in `.cache/`, optionally pinned via
    `APPIMAGETOOL_URL`/`APPIMAGETOOL_SHA256`) and packs the AppDir into
-   `steampunk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
-   `gh-releases-zsync` delta updates.
+   `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
+   `gh-releases-zsync` delta updates (`steam-punk-*` pattern). An identical
+   copy named `steampunk-$VERSION-...` (+ `.zsync`) is also produced and
+   released so pre-rename installs, which embed the old pattern, can update.
 5. Runs `zsyncmake` directly on the built AppImage to produce the `.zsync`
    sidecar (see KernelPop's CLAUDE.md for the diagnosis of why
    `appimagetool`'s own zsync generation silently no-ops on GitHub Actions
@@ -117,7 +131,7 @@ as GreenLight/KernelPop:
 - Don't use `sed`/`awk` to edit files — use direct file writes/edits.
   `tee` is fine for one-off terminal inspection, but Claude Code sessions
   should edit files directly rather than shelling through it.
-- Repo lives at `/home/alex/Projects/SteamPunk`, owned by user `alex` — if
+- Repo lives at `/home/alex/Projects/SteamPunk` (local dir name unchanged), owned by user `alex` — if
   operating as root, run git commands as `alex`
   (`su -s /bin/bash alex -c '...'`) to keep authorship and file ownership
   correct.

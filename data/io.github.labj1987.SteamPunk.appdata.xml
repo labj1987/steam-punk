@@ -14,20 +14,21 @@
       wineserver process, not from potentially stale compatdata metadata.
     </p>
   </description>
-  <launchable type="desktop-id">steampunk.desktop</launchable>
-  <url type="homepage">https://github.com/labj1987/SteamPunk</url>
+  <launchable type="desktop-id">steam-punk.desktop</launchable>
+  <url type="homepage">https://github.com/labj1987/steam-punk</url>
   <developer id="io.github.labj1987">
     <name>Linnard Alex Brown Jr.</name>
   </developer>
   <provides>
-    <binary>steampunk</binary>
+    <binary>steam-punk</binary>
   </provides>
   <categories>
     <category>Game</category>
     <category>Utility</category>
   </categories>
   <releases>
-    <release version="0.4.8" date="2026-09-21"/>
+    <release version="0.4.9" date="2026-09-21"/>
+    <release version="0.4.8"date="2026-09-21"/>
     <release version="0.4.7" date="2026-09-17"/>
     <release version="0.4.6" date="2026-09-17"/>
     <release version="0.4.5" date="2026-09-09"/>
