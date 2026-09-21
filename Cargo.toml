@@ -16,7 +16,7 @@ libadwaita = { version = "0.9", features = ["v1_4", "v1_5"] }
 glib = "0.22"
 gio = "0.22"
 gdk4 = "0.11"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 anyhow = "1"
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

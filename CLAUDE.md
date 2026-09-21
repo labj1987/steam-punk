@@ -5,7 +5,7 @@ game-trainer executables (e.g. FLiNG trainers) through Proton directly
 against a currently running Steam game's existing wine session, on Linux.
 Distributed as a single AppImage.
 
-The trainer is run on the host as `<proton_dir>/proton run <trainer.exe>`
+The trainer is run on the host as `<proton_dir>/proton runinprefix <trainer.exe>`
 with `STEAM_COMPAT_CLIENT_INSTALL_PATH`/`STEAM_COMPAT_DATA_PATH` pointed at
 the game's own compatdata, so the trainer's wine client joins the game's
 existing wineserver (whose socket lives under `/tmp`, shared with the host)
@@ -40,7 +40,9 @@ which has been observed stale.
 
 **The dotnet40/wine-mono fix.** Proton's bundled wine-mono is not real .NET
 and cannot run WPF-based trainers — current FLiNG trainers require .NET
-Framework 4.6.2+, older ones run on 4.0. Checking the registry `Release`
+Framework 4.6.2+, older ones run on 4.0. The app does modify the game's
+prefix to fix this: the repair copies runtime files in and imports a `.reg`
+file (via `proton runinprefix regedit`), or runs winetricks `dotnet48`. Checking the registry `Release`
 value alone is not enough: wine-mono advertises a 4.8 `Release` in prefixes
 that have no real .NET at all. `launcher::dotnet_status` instead verifies
 everything that actually has to hold for the CLR to load: `clr.dll`
@@ -89,7 +91,8 @@ as GreenLight/KernelPop:
 2. `cargo build --release`.
 3. Assembles the AppDir (binary, privileged script, polkit policy, appdata,
    desktop file, icon, generated `AppRun`).
-4. Downloads `appimagetool` (continuous build) and packs the AppDir into
+4. Downloads `appimagetool` (cached in `.cache/`, optionally pinned via
+   `APPIMAGETOOL_URL`/`APPIMAGETOOL_SHA256`) and packs the AppDir into
    `steampunk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
    `gh-releases-zsync` delta updates.
 5. Runs `zsyncmake` directly on the built AppImage to produce the `.zsync`
@@ -100,11 +103,13 @@ as GreenLight/KernelPop:
 ## Release process
 
 1. Bump `version` in `Cargo.toml`.
-2. Add a `CHANGELOG.md` entry.
+2. Add a `CHANGELOG.md` entry and an appdata `<release>` (the build also
+   inserts the current version if it is missing).
 3. Commit, push to `main`.
 4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 5. The tag push triggers `.github/workflows/release.yml` ("Build and
-   Release"), which runs `build-appimage.sh` and uploads the AppImage
+   Release"), which checks the tag matches `Cargo.toml`, runs
+   `cargo test`, then `build-appimage.sh`, and uploads the AppImage
    (+ `.zsync`) to a GitHub Release via `softprops/action-gh-release`.
 
 ## Conventions

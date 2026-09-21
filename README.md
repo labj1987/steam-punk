@@ -16,7 +16,7 @@ The trainer is launched directly on the host — no Steam Linux Runtime
 container, no umu-launcher:
 
 ```
-<proton_dir>/proton run <trainer.exe>
+<proton_dir>/proton runinprefix <trainer.exe>
 ```
 
 with two environment variables set:
@@ -40,10 +40,13 @@ actual running `wineserver` process rather than trusting `compatdata`'s
 2. Drag a trainer `.exe` onto the window (or use the + button) to import it.
 3. Click Launch on the trainer's row. A running trainer shows a live badge and a Stop button in its place.
 
-If the game's prefix doesn't have real .NET Framework 4.0 yet (required by
-WPF-based trainers, and never provided by Proton's bundled wine-mono), the
-app shows the exact one-time `winetricks` commands to run instead of
-launching.
+If the game's prefix doesn't have a real .NET Framework 4.6.2 or newer yet
+(required by current WPF-based trainers, and never provided by Proton's
+bundled wine-mono), the app offers a one-time setup. It first tries to copy a
+working runtime from another game's Proton prefix, and otherwise installs
+`dotnet48` with `winetricks` (system packages via a one-time password prompt on
+Debian/Ubuntu; the manual commands are shown elsewhere). This modifies the
+game's Wine prefix: it installs the .NET runtimes and imports a `.reg` file.
 
 ## Requirements
 
@@ -63,8 +66,8 @@ Produces `steampunk-<version>-x86_64.AppImage` (+ `.zsync` sidecar).
 ## Non-goals
 
 No trainer downloading/update-checking, no SLR/pressure-vessel/umu
-integration, no prefix modification (the app only detects and instructs),
-no per-game trainer database.
+integration, no per-game trainer database. (The app does modify a game's
+prefix, but only to repair a missing .NET runtime, and only on request.)
 
 ## License
 

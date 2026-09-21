@@ -18,6 +18,27 @@ jobs:
       - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check tag matches Cargo.toml version
+        run: |
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev pkg-config libssl-dev
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy
+        continue-on-error: true
+
       - name: Build AppImage
         run: sudo -E env "PATH=$PATH" bash build-appimage.sh
 
