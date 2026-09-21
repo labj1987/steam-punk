@@ -217,7 +217,13 @@ pub fn build_ui(app: &Application) {
                     }
                 }
 
-                let running_pgid = running.borrow().get(&trainer.path).copied();
+                // pgid 0 = launch pending (no process yet): show Launch, whose
+                // click is a no-op until the launch resolves.
+                let running_pgid = running
+                    .borrow()
+                    .get(&trainer.path)
+                    .copied()
+                    .filter(|&p| p != 0);
 
                 if let Some(pgid) = running_pgid {
                     let running_badge = Label::new(Some("Running"));
@@ -298,7 +304,7 @@ pub fn build_ui(app: &Application) {
             let exited: Vec<std::path::PathBuf> = running
                 .borrow()
                 .iter()
-                .filter(|(_, &pgid)| !launcher::process_group_alive(pgid))
+                .filter(|(_, &pgid)| pgid != 0 && !launcher::process_group_alive(pgid))
                 .map(|(path, _)| path.clone())
                 .collect();
             if !exited.is_empty() {
@@ -395,18 +401,22 @@ pub fn build_ui(app: &Application) {
     // ─────────────────────────────────────────────────────────────────────────
     {
         let toast_overlay = toast_overlay.clone();
+        let running = running.clone();
+        let refresh_list = refresh_list.clone();
         stop_all_btn.connect_clicked(move |_| {
             let toast_overlay = toast_overlay.clone();
+            let running = running.clone();
+            let refresh_list = refresh_list.clone();
+            // Only real, tracked process groups; pgid 0 is a launch that
+            // hasn't produced a process yet.
+            let pgids: Vec<u32> = running.borrow().values().copied().filter(|&p| p != 0).collect();
             spawn_async(
-                async {
-                    tokio::task::spawn_blocking(|| {
-                        if let Ok(dir) = library::trainers_dir() {
-                            launcher::stop_all(&dir);
-                        }
-                    })
-                    .await
+                async move {
+                    tokio::task::spawn_blocking(move || launcher::stop_all(&pgids)).await
                 },
                 move |_| {
+                    running.borrow_mut().retain(|_, &mut pgid| pgid == 0);
+                    refresh_list();
                     toast_overlay.add_toast(Toast::new("Stopped all trainers"));
                 },
             );
@@ -857,6 +867,25 @@ fn show_game_picker(
 }
 
 type RunningMap = Rc<RefCell<std::collections::HashMap<std::path::PathBuf, u32>>>;
+
+/// Marks a trainer as "launch pending" (pgid 0 in `running`) from the moment
+/// Launch is clicked, so a second click before the launch resolves is a no-op
+/// instead of starting a second, untracked process. The marker is removed when
+/// the last clone of the guard drops — whichever way the flow ends (toast,
+/// cancelled dialog, failure). A real pgid recorded meanwhile is left alone.
+struct PendingLaunch {
+    running: RunningMap,
+    path: std::path::PathBuf,
+}
+
+impl Drop for PendingLaunch {
+    fn drop(&mut self) {
+        let mut r = self.running.borrow_mut();
+        if r.get(&self.path) == Some(&0) {
+            r.remove(&self.path);
+        }
+    }
+}
 type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 fn wire_launch_button(
@@ -868,6 +897,14 @@ fn wire_launch_button(
     refresh_slot: RefreshSlot,
 ) {
     btn.connect_clicked(move |_| {
+        if running.borrow().contains_key(&trainer.path) {
+            return;
+        }
+        running.borrow_mut().insert(trainer.path.clone(), 0);
+        let guard = Rc::new(PendingLaunch {
+            running: running.clone(),
+            path: trainer.path.clone(),
+        });
         let trainer = trainer.clone();
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
@@ -882,11 +919,12 @@ fn wire_launch_button(
             Rc::new(move |target| {
                 let trainer = trainer.clone();
                 let toasts = dialog_toasts.clone();
+                let guard = guard.clone();
                 if !launcher::has_usable_dotnet(&target) {
-                    show_dotnet_dialog(&dialog_window, target, trainer, toasts, running.clone(), refresh_slot.clone());
+                    show_dotnet_dialog(&dialog_window, target, trainer, toasts, running.clone(), refresh_slot.clone(), guard);
                     return;
                 }
-                launch_trainer_now(target, trainer, toasts, running.clone(), refresh_slot.clone());
+                launch_trainer_now(target, trainer, toasts, running.clone(), refresh_slot.clone(), guard);
             }),
         );
     });
@@ -904,6 +942,7 @@ fn launch_trainer_now(
     toast_overlay: ToastOverlay,
     running: RunningMap,
     refresh_slot: RefreshSlot,
+    guard: Rc<PendingLaunch>,
 ) {
     let trainer_name = trainer.name.clone();
     let trainer_path = trainer.path.clone();
@@ -921,6 +960,7 @@ fn launch_trainer_now(
         },
         move |launch_result| match launch_result {
             Ok(Ok(pgid)) => {
+                let _guard = &guard;
                 toast_overlay2.add_toast(Toast::new(&format!(
                     "Launched {trainer_name} (AppId {appid})"
                 )));
@@ -992,6 +1032,7 @@ fn show_dotnet_dialog(
     toast_overlay: ToastOverlay,
     running: RunningMap,
     refresh_slot: RefreshSlot,
+    guard: Rc<PendingLaunch>,
 ) {
     let body = "This game needs a one-time Windows compatibility component before trainers \
 will run. This will ask for your password once, then take a minute or two.";
@@ -1031,6 +1072,9 @@ will run. This will ask for your password once, then take a minute or two.";
     // moved directly — the dialog only ever fires one response in practice.
     let state: Rc<RefCell<Option<(LaunchTarget, Trainer)>>> =
         Rc::new(RefCell::new(Some((target, trainer))));
+    // Held by the response handler so the pending marker lasts as long as the
+    // dialog (and the setup it triggers, which takes the guard along).
+    let guard_slot: Rc<RefCell<Option<Rc<PendingLaunch>>>> = Rc::new(RefCell::new(Some(guard)));
 
     dialog.connect_response(None, move |_dialog, response| {
         if response != "setup" {
@@ -1039,7 +1083,10 @@ will run. This will ask for your password once, then take a minute or two.";
         let Some((target, trainer)) = state.borrow_mut().take() else {
             return;
         };
-        run_automatic_setup(target, trainer, toast_overlay.clone(), running.clone(), refresh_slot.clone());
+        let Some(guard) = guard_slot.borrow_mut().take() else {
+            return;
+        };
+        run_automatic_setup(target, trainer, toast_overlay.clone(), running.clone(), refresh_slot.clone(), guard);
     });
 
     dialog.present(Some(window));
@@ -1056,6 +1103,7 @@ fn run_automatic_setup(
     toast_overlay: ToastOverlay,
     running: RunningMap,
     refresh_slot: RefreshSlot,
+    guard: Rc<PendingLaunch>,
 ) {
     toast_overlay.add_toast(Toast::new("Setting up .NET — this may take a minute or two…"));
 
@@ -1099,7 +1147,7 @@ fn run_automatic_setup(
                     return;
                 }
             };
-            launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot);
+            launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard);
         },
     );
 }

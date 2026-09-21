@@ -162,23 +162,24 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out.into_iter().collect()
 }
 
-/// Fallback when no wineserver is found yet: line 2 of config_info, split on
-/// '/' (never on whitespace — Proton directory names contain spaces, e.g.
-/// "Proton - Experimental"), up to and including the first segment whose
-/// lowercase contains "proton".
-fn find_proton_dir_from_config_info(compatdata_dir: &Path) -> Option<PathBuf> {
-    let contents = std::fs::read_to_string(compatdata_dir.join("config_info")).ok()?;
-    let line2 = contents.lines().nth(1)?;
-    let segments: Vec<&str> = line2.split('/').collect();
-    let idx = segments
-        .iter()
-        .position(|s| s.to_lowercase().contains("proton"))?;
-    let joined = segments[..=idx].join("/");
-    if joined.is_empty() {
+/// Fallback when no wineserver is found yet: line 2 of config_info is a path
+/// inside the Proton build (`<proton_dir>/files/...`), so the Proton dir is
+/// everything before the `/files/` marker. Split on the marker rather than on
+/// a substring like "proton", which misfires on library paths such as
+/// `/mnt/ProtonDrive/...` or usernames containing it. Never split on
+/// whitespace — Proton directory names contain spaces ("Proton - Experimental").
+fn proton_dir_from_config_line(line: &str) -> Option<PathBuf> {
+    let (dir, _) = line.split_once("/files/")?;
+    if dir.is_empty() {
         None
     } else {
-        Some(PathBuf::from(joined))
+        Some(PathBuf::from(dir))
     }
+}
+
+fn find_proton_dir_from_config_info(compatdata_dir: &Path) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string(compatdata_dir.join("config_info")).ok()?;
+    proton_dir_from_config_line(contents.lines().nth(1)?)
 }
 
 fn find_proton_dir(compatdata_dir: &Path) -> Option<PathBuf> {
@@ -720,8 +721,10 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
         .arg(r"C:\windows\temp\proton-trainer-dotnet.reg")
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
         .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
-        .status()
-        .with_context(|| format!("running regedit via {}", proton.display()))?;
+        .status();
+    // The temp .reg is only needed for the import; drop it either way.
+    let _ = std::fs::remove_file(&reg_path);
+    let status = status.with_context(|| format!("running regedit via {}", proton.display()))?;
 
     crate::applog::log(&format!("apply_dotnet_registry: regedit exited {status:?}"));
     if !status.success() {
@@ -815,6 +818,17 @@ pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_info_splits_on_files_marker_not_proton_substring() {
+        assert_eq!(
+            proton_dir_from_config_line(
+                "/mnt/ProtonDrive/steamapps/common/Proton - Experimental/files/share/fonts/"
+            ),
+            Some(PathBuf::from("/mnt/ProtonDrive/steamapps/common/Proton - Experimental"))
+        );
+        assert_eq!(proton_dir_from_config_line("/no/marker/here"), None);
+    }
 
     /// A scratch directory under the test binary's own temp space, removed on drop.
     struct Scratch(PathBuf);
@@ -1031,22 +1045,15 @@ mod tests {
     }
 }
 
-/// Kill every running trainer: their unpacked TrainerCacheData helper
-/// process, plus anything still referencing the managed trainers dir.
-pub fn stop_all(trainers_dir: &Path) {
-    let s1 = std::process::Command::new("pkill")
-        .arg("-f")
-        .arg("TrainerCacheData")
-        .status();
-    crate::applog::log(&format!("stop_all: pkill -f TrainerCacheData -> {s1:?}"));
-    let s2 = std::process::Command::new("pkill")
-        .arg("-f")
-        .arg(trainers_dir)
-        .status();
-    crate::applog::log(&format!(
-        "stop_all: pkill -f {} -> {s2:?}",
-        trainers_dir.display()
-    ));
+/// Stop every tracked trainer by signalling exactly the process groups we
+/// launched, instead of `pkill -f` pattern matching against every process's
+/// command line (which can hit unrelated processes). Blocks up to ~2s per
+/// group — call via `spawn_blocking`.
+pub fn stop_all(pgids: &[u32]) {
+    for &pgid in pgids.iter().filter(|&&p| p > 1) {
+        stop_trainer(pgid);
+    }
+    crate::applog::log(&format!("stop_all: stopped pgids {pgids:?}"));
 }
 
 /// Per-game trainer-logs directories FLiNG trainers leave behind. Each may
