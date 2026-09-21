@@ -45,6 +45,13 @@ WPF-based trainers, and never provided by Proton's bundled wine-mono), the
 app shows the exact one-time `winetricks` commands to run instead of
 launching.
 
+## Requirements
+
+The AppImage does not bundle GTK or libadwaita: it uses the host's, so the
+system needs **GTK 4 and libadwaita >= 1.5**. Automatic one-time setup (system
+packages for the .NET install) is Debian/Ubuntu-only; other distributions get
+the manual commands to run instead.
+
 ## Building
 
 ```

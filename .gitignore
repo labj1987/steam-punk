@@ -2,3 +2,4 @@
 /build-appimage
 *.AppImage
 *.AppImage.zsync
+.cache

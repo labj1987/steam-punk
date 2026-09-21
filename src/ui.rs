@@ -1092,11 +1092,20 @@ fn wire_stop_button(
 /// default path is the "Set Up Automatically" button, which runs the same
 /// commands itself via setup::run_system_setup / setup::install_dotnet48.
 fn manual_commands(target: &LaunchTarget) -> String {
-    format!(
-        "dpkg --add-architecture i386 && apt update && apt install -y winetricks cabextract wine32:i386\n\
-WINEPREFIX={} winetricks -q dotnet48 win10",
+    let winetricks = format!(
+        "WINEPREFIX={} winetricks -q dotnet48 win10",
         target.prefix_dir().display()
-    )
+    );
+    if setup::apt_available() {
+        format!(
+            "dpkg --add-architecture i386 && apt update && apt install -y winetricks cabextract wine32:i386\n{winetricks}"
+        )
+    } else {
+        format!(
+            "# Install winetricks, cabextract and 32-bit wine support with your\n\
+# distribution's package manager, then:\n{winetricks}"
+        )
+    }
 }
 
 fn show_dotnet_dialog(
@@ -1108,8 +1117,17 @@ fn show_dotnet_dialog(
     refresh_slot: RefreshSlot,
     guard: Rc<PendingLaunch>,
 ) {
-    let body = "This game needs a one-time Windows compatibility component before trainers \
-will run. This will ask for your password once, then take a minute or two.";
+    // The privileged setup script is apt-only; elsewhere offer just the
+    // manual command list rather than a password prompt that then fails.
+    let automatic = setup::apt_available();
+    let body = if automatic {
+        "This game needs a one-time Windows compatibility component before trainers \
+will run. This will ask for your password once, then take a minute or two."
+    } else {
+        "This game needs a one-time Windows compatibility component before trainers \
+will run. Automatic setup is only available on Debian/Ubuntu-based systems; run the \
+commands below yourself, then launch the trainer again."
+    };
 
     let commands_label = Label::new(Some(&manual_commands(&target)));
     commands_label.set_wrap(true);
@@ -1121,8 +1139,8 @@ will run. This will ask for your password once, then take a minute or two.";
     commands_label.set_margin_end(12);
 
     let expander = ExpanderRow::builder()
-        .title("Show manual commands instead")
-        .expanded(false)
+        .title(if automatic { "Show manual commands instead" } else { "Manual commands" })
+        .expanded(!automatic)
         .build();
     expander.add_row(&commands_label);
 
@@ -1136,9 +1154,13 @@ will run. This will ask for your password once, then take a minute or two.";
         .body(body)
         .extra_child(&disclosure_list)
         .build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("setup", "Set Up Automatically")]);
-    dialog.set_response_appearance("setup", ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("setup"));
+    if automatic {
+        dialog.add_responses(&[("cancel", "Cancel"), ("setup", "Set Up Automatically")]);
+        dialog.set_response_appearance("setup", ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("setup"));
+    } else {
+        dialog.add_response("cancel", "Close");
+    }
     dialog.set_close_response("cancel");
 
     // AlertDialog::connect_response requires Fn, not FnOnce, so the

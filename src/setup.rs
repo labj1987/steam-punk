@@ -13,14 +13,27 @@ use std::process::Command;
 const SCRIPT: &str = "/usr/lib/steampunk/privileged-setup.sh";
 pub const LOGFILE: &str = "/var/log/steampunk.log";
 
+/// True on Debian-family systems: `privileged-setup.sh` is apt-only, so the
+/// automatic system setup is only offered where `apt-get` exists.
+pub fn apt_available() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|d| d.join("apt-get").is_file()))
+        .unwrap_or(false)
+        || Path::new("/usr/bin/apt-get").is_file()
+}
+
 /// Returns true if the one-time system packages are already present — skip
 /// pkexec entirely if so. Both checks are quick and need no root.
 pub fn system_prereqs_present() -> bool {
-    let present = Command::new("dpkg")
-        .args(["-s", "wine32:i386"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    // wine32:i386 is a Debian-family package; other distros have no dpkg, so
+    // only winetricks itself can be checked there.
+    let wine32 = !apt_available()
+        || Command::new("dpkg")
+            .args(["-s", "wine32:i386"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+    let present = wine32
         && Command::new("which")
             .arg("winetricks")
             .output()
