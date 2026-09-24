@@ -709,7 +709,7 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
 
     let temp_dir = target.prefix_dir().join("drive_c/windows/temp");
     std::fs::create_dir_all(&temp_dir)?;
-    let reg_path = temp_dir.join("proton-trainer-dotnet.reg");
+    let reg_path = temp_dir.join("steam-punk-dotnet.reg");
     std::fs::write(&reg_path, dotnet_reg_export(&donor_reg))
         .with_context(|| format!("writing {}", reg_path.display()))?;
 
@@ -718,7 +718,7 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
         .arg("runinprefix")
         .arg("regedit")
         .arg("/S")
-        .arg(r"C:\windows\temp\proton-trainer-dotnet.reg")
+        .arg(r"C:\windows\temp\steam-punk-dotnet.reg")
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
         .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
         .status();

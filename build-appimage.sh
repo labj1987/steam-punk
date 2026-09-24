@@ -178,15 +178,3 @@ if zsyncmake "$OUT"; then
 else
     echo "==> WARNING: zsyncmake failed — continuing without .zsync"
 fi
-
-# Back-compat: installs made before the steampunk -> steam-punk rename embed
-# the old update pattern (steampunk-*-x86_64.AppImage.zsync). Publish an
-# identical copy under the legacy name so they can still self-update once;
-# the copy carries the new UPDATE_INFORMATION, so later updates use new names.
-LEGACY_OUT="steampunk-$VERSION-$ARCH.AppImage"
-cp "$OUT" "$LEGACY_OUT"
-if zsyncmake "$LEGACY_OUT"; then
-    echo "==> legacy-name copy + .zsync generated: $LEGACY_OUT"
-else
-    echo "==> WARNING: zsyncmake failed for legacy copy"
-fi

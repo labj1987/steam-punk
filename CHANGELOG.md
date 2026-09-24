@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.10 — 2026-09-24
+
+- Removed the pre-rename compatibility: releases no longer publish legacy
+  `steampunk-*` AppImage/.zsync copies, and the app no longer migrates
+  `~/.local/share/proton-trainer` or `~/.local/share/steampunk` or leaves a
+  `steampunk` symlink behind. The .NET registry import's temp file is now
+  `steam-punk-dotnet.reg`.
+- Fixed a malformed release entry in the AppStream metadata.
+
 ## 0.4.9 — 2026-09-21
 
 - Renamed to the hyphenated `steam-punk` convention: binary, crate, GitHub

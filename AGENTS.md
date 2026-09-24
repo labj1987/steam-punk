@@ -7,8 +7,7 @@ crate, GitHub repo, AppImage filename, `.desktop` and icon filenames, data
 dir and log files all use hyphenated lowercase `steam-punk`. The app ID
 `io.github.labj1987.SteamPunk` and the polkit action ids stay UNCHANGED
 (PascalCase) — never rename them. Old names (`steampunk`, `proton-trainer`)
-appear only in deliberate back-compat/migration code (data-dir migration,
-the legacy-named AppImage copy) — don't add new uses.
+are gone from the code with no back-compat of any kind — don't add new uses.
 
 GTK4 + libadwaita desktop app, written in Rust, for launching Windows
 game-trainer executables (e.g. FLiNG trainers) through Proton directly
@@ -25,16 +24,15 @@ which has been observed stale.
 
 ## Module layout (`src/`)
 
-- `main.rs` — entry point, runs the legacy data-dir migration before
-  anything else touches it, sets up the shared Tokio runtime, wires up the
+- `main.rs` — entry point, sets up the shared Tokio runtime, wires up the
   GTK application.
 - `ui.rs` — the GTK4/libadwaita UI: trainer list, import (drag-and-drop or
   +), AppID search/association, launch/troubleshoot dialogs.
 - `launcher.rs` — resolves the running Proton build and compat paths,
   spawns the trainer, and the whole .NET-usability check/repair path (see
   gotcha below). Largest file in the app.
-- `library.rs` — trainer list persistence (`trainers.json`), the
-  pre-rename data-dir migration, per-trainer AppID metadata.
+- `library.rs` — trainer list persistence (`trainers.json`), per-trainer
+  AppID metadata.
 - `gamedata.rs` — resolves a game's name and cover art from a Steam AppID
   via the public Steam Store API/CDN (see caching design below).
 - `steam.rs` — locates the local Steam client install and library folders.
@@ -80,17 +78,6 @@ with a name and no art is still strictly better than falling back to the
 filename. `cached_name`/`cached_cover` never hit the network; a cache miss
 just means the caller falls back to the trainer's filename-derived title.
 
-**The data-dir migration (proton-trainer/steampunk → steam-punk).**
-`library::migrate_legacy_data_dir` renames `~/.local/share/proton-trainer`
-and/or `~/.local/share/steampunk` to `~/.local/share/steam-punk` on first
-run (merging without overwriting if both exist, and leaving a symlink at the
-old `steampunk` path for not-yet-updated AppImages), so existing imported
-trainers and logs survive. It
-must run before anything else (including `applog`) touches the data dir —
-called first thing in `main.rs`. The `proton-trainer-dotnet.reg` temp
-filename in `launcher.rs` is unrelated and intentionally left as-is (a
-temp file's name doesn't matter).
-
 ## Build process
 
 `build-appimage.sh` builds the AppImage, `appimagetool`-direct
@@ -106,9 +93,7 @@ temp file's name doesn't matter).
 4. Downloads `appimagetool` (cached in `.cache/`, optionally pinned via
    `APPIMAGETOOL_URL`/`APPIMAGETOOL_SHA256`) and packs the AppDir into
    `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
-   `gh-releases-zsync` delta updates (`steam-punk-*` pattern). An identical
-   copy named `steampunk-$VERSION-...` (+ `.zsync`) is also produced and
-   released so pre-rename installs, which embed the old pattern, can update.
+   `gh-releases-zsync` delta updates (`steam-punk-*` pattern).
 5. Runs `zsyncmake` directly on the built AppImage to produce the `.zsync`
    sidecar (`appimagetool`'s own zsync generation silently no-ops on GitHub Actions
    runners). Keep that call non-fatal — the AppImage is valid without it.

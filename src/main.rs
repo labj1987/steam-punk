@@ -23,7 +23,6 @@ pub fn runtime() -> &'static Runtime {
 
 fn main() {
     let _ = runtime();
-    library::migrate_legacy_data_dir();
     applog::init();
 
     // Set program name before GTK init. On Wayland the app_id GNOME sees is

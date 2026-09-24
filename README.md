@@ -61,9 +61,7 @@ the manual commands to run instead.
 ./build-appimage.sh
 ```
 
-Produces `steam-punk-<version>-x86_64.AppImage` (+ `.zsync` sidecar). Releases
-also carry a legacy-named `steampunk-<version>-x86_64.AppImage` copy so installs
-made before the rename can still self-update.
+Produces `steam-punk-<version>-x86_64.AppImage` (+ `.zsync` sidecar).
 
 ## Non-goals
 

@@ -47,5 +47,4 @@ jobs:
         with:
           files: |
             steam-punk-*-x86_64.AppImage*
-            steampunk-*-x86_64.AppImage*
           generate_release_notes: true

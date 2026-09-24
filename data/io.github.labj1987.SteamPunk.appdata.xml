@@ -27,8 +27,9 @@
     <category>Utility</category>
   </categories>
   <releases>
+    <release version="0.4.10" date="2026-09-24"/>
     <release version="0.4.9" date="2026-09-21"/>
-    <release version="0.4.8"date="2026-09-21"/>
+    <release version="0.4.8" date="2026-09-21"/>
     <release version="0.4.7" date="2026-09-17"/>
     <release version="0.4.6" date="2026-09-17"/>
     <release version="0.4.5" date="2026-09-09"/>
