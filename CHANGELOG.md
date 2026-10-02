@@ -14,9 +14,10 @@
   the AppID step; you still confirm it. A trailing "Trainer" is no longer left
   in the pre-filled search.
 - One-time-per-session warning when launching against a game with an online
-  anti-cheat (GTA V Enhanced and Legacy, or any game whose install folder
-  ships Easy Anti-Cheat or BattlEye): use trainers in single-player only,
-  online use can get an account banned.
+  anti-cheat, for online games only (GTA V Enhanced and Legacy, or any game
+  with online play per its Steam Store categories whose install folder ships
+  Easy Anti-Cheat or BattlEye; single-player-only games are never warned):
+  use trainers in single-player only, online use can get an account banned.
 - Failed launches are diagnosed: if a trainer's process group is gone within
   20 seconds of launch, the app checks whether the game stopped running,
   whether the trainer used a different Proton build than the game's

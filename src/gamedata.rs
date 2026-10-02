@@ -48,6 +48,64 @@ pub fn cached_name(appid: u32) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn online_cache_path(appid: u32) -> Result<PathBuf> {
+    Ok(cache_dir()?.join(format!("{appid}.online.txt")))
+}
+
+/// Steam Store category ids that mean a game has online play: 36 = Online
+/// PvP, 38 = Online Co-op, 20 = MMO.
+const ONLINE_CATEGORY_IDS: &[u64] = &[36, 38, 20];
+
+/// Whether an appdetails `data` object lists an online-play category.
+fn has_online_category(data: &serde_json::Value) -> bool {
+    data.get("categories")
+        .and_then(|v| v.as_array())
+        .is_some_and(|cats| {
+            cats.iter()
+                .filter_map(|c| c.get("id").and_then(|id| id.as_u64()))
+                .any(|id| ONLINE_CATEGORY_IDS.contains(&id))
+        })
+}
+
+/// Whether the game is known to have online play, from the cache only (no
+/// network). `None` means unknown: never looked up, or the lookup failed.
+pub fn cached_online(appid: u32) -> Option<bool> {
+    let text = std::fs::read_to_string(online_cache_path(appid).ok()?).ok()?;
+    match text.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Looks up the game's online-play categories once and caches the result.
+/// An existing cache entry skips the request; a failure writes nothing, so
+/// the game stays "unknown" and the next association retries.
+async fn fetch_and_cache_online(client: &reqwest::Client, appid: u32) -> Result<()> {
+    if cached_online(appid).is_some() {
+        return Ok(());
+    }
+    let url = format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=categories");
+    let body: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("requesting categories for AppID {appid}"))?
+        .error_for_status()
+        .with_context(|| format!("categories request returned an error status for AppID {appid}"))?
+        .json()
+        .await
+        .context("parsing categories response as JSON")?;
+    let data = body
+        .get(appid.to_string())
+        .and_then(|v| v.get("data"))
+        .with_context(|| format!("categories response for AppID {appid} has no data"))?;
+    let online = has_online_category(data);
+    std::fs::write(online_cache_path(appid)?, if online { "1" } else { "0" })
+        .with_context(|| format!("caching online flag for AppID {appid}"))?;
+    Ok(())
+}
+
 /// The cached cover-art image path, if a fetch has previously succeeded.
 pub fn cached_cover(appid: u32) -> Option<PathBuf> {
     let path = cover_cache_path(appid).ok()?;
@@ -69,6 +127,20 @@ pub fn cached_cover(appid: u32) -> Option<PathBuf> {
 /// the cover from Steam's own library art cache, so an installed game needs no
 /// network at all. Only what the local lookup could not supply is fetched.
 pub async fn fetch_and_cache(appid: u32) -> Result<()> {
+    let result = fetch_name_and_cover(appid).await;
+    // The online-play flag is independent of name and cover; a failure here
+    // only leaves it unknown (no anti-cheat warning for unlisted games).
+    let online = match http_client() {
+        Ok(c) => fetch_and_cache_online(&c, appid).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = online {
+        crate::applog::log(&format!("gamedata: online-play lookup failed for AppID {appid}: {e}"));
+    }
+    result
+}
+
+async fn fetch_name_and_cover(appid: u32) -> Result<()> {
     let dir = cache_dir()?;
     std::fs::create_dir_all(&dir)?;
 
@@ -606,7 +678,7 @@ fn strip_early_access(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::guess_search_term;
+    use super::{guess_search_term, has_online_category};
     use std::path::PathBuf;
 
     #[test]
@@ -725,6 +797,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn online_categories_are_parsed_from_appdetails() {
+        let online = |s: &str| has_online_category(&serde_json::from_str(s).unwrap());
+        assert!(online(r#"{"categories":[{"id":2,"description":"Single-player"},{"id":36,"description":"Online PvP"}]}"#));
+        assert!(online(r#"{"categories":[{"id":38}]}"#));
+        assert!(online(r#"{"categories":[{"id":20}]}"#));
+        // Plain Multi-player (1) or local co-op does not count as online.
+        assert!(!online(r#"{"categories":[{"id":1},{"id":2},{"id":24}]}"#));
+        assert!(!online(r#"{"categories":[]}"#));
+        assert!(!online(r#"{"name":"x"}"#));
+        assert!(!online(r#"{"categories":"bad"}"#));
     }
 
     #[test]

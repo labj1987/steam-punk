@@ -43,8 +43,8 @@ actual running `wineserver` process rather than trusting `compatdata`'s
 Game names and cover art come from your local Steam install (including
 Flatpak Steam) when available, and from the public Steam Store otherwise. On
 import, the app suggests the installed game that matches the trainer's file
-name. Games with an online anti-cheat get a one-time warning: use trainers in
-single-player only. If a trainer dies right after launch, the likely cause
+name. Online games with an anti-cheat get a one-time warning (single-player-only
+games never do): use trainers in single-player only. If a trainer dies right after launch, the likely cause
 (game closed, different Proton build, missing .NET) is shown under Fix Stale
 Instance.
 

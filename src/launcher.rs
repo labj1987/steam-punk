@@ -1,4 +1,4 @@
-use crate::steam;
+use crate::{gamedata, steam};
 use anyhow::{anyhow, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -677,8 +677,9 @@ pub fn check_early_exit(pgid: u32) -> Option<String> {
 }
 
 /// Games shipped with online modes where trainers risk an account ban. Kept
-/// to a handful of known titles; everything else is detected from the
-/// install folder (see `install_has_anticheat`).
+/// to a handful of known titles; everything else needs anti-cheat in the
+/// install folder (see `install_has_anticheat`) and confirmed online play
+/// (see `gamedata::cached_online`).
 const ONLINE_ANTICHEAT_APPIDS: &[(u32, &str)] = &[
     (3240220, "Grand Theft Auto V Enhanced"),
     (271590, "Grand Theft Auto V Legacy"),
@@ -700,20 +701,35 @@ fn install_has_anticheat(dir: &Path) -> bool {
 
 static ANTICHEAT_NOTICED: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// The game's name if it has online anti-cheat and the notice has not yet
-/// been shown for it this session. Marks it shown, so each game is warned
-/// about once per session.
+/// Whether to warn: the game is on the known online list, or anti-cheat is
+/// in its install AND it is known to have online play. An unknown online
+/// status (`None`) never warns on its own.
+fn should_warn_anticheat(known: bool, detected: bool, online: Option<bool>) -> bool {
+    known || (detected && online == Some(true))
+}
+
+/// The game's name if it is an online game with anti-cheat and the notice
+/// has not yet been shown for it this session. Marks it shown, so each game
+/// is warned about once per session. Reads local files and the cache only;
+/// never touches the network.
 pub fn anticheat_notice(target: &LaunchTarget) -> Option<String> {
     let known = ONLINE_ANTICHEAT_APPIDS
         .iter()
         .find(|(id, _)| *id == target.appid)
         .map(|(_, name)| (*name).to_string());
-    let name = known.or_else(|| {
-        let libs = steam::library_folders(&target.client_dir);
-        let appid = target.appid.to_string();
-        let detected = steam::game_install_dir(&libs, &appid).is_some_and(|d| install_has_anticheat(&d));
-        detected.then(|| steam::game_name(&libs, &appid).unwrap_or_else(|| format!("AppId {}", target.appid)))
-    })?;
+    let libs = steam::library_folders(&target.client_dir);
+    let appid = target.appid.to_string();
+    let online = gamedata::cached_online(target.appid);
+    // Skip the folder scan when it cannot change the outcome.
+    let detected = known.is_none()
+        && online == Some(true)
+        && steam::game_install_dir(&libs, &appid).is_some_and(|d| install_has_anticheat(&d));
+    if !should_warn_anticheat(known.is_some(), detected, online) {
+        return None;
+    }
+    let name = known.unwrap_or_else(|| {
+        steam::game_name(&libs, &appid).unwrap_or_else(|| format!("AppId {}", target.appid))
+    });
     let first_time = ANTICHEAT_NOTICED.lock().ok()?.insert(target.appid);
     first_time.then_some(name)
 }
@@ -1318,6 +1334,21 @@ mod tests {
         assert!(!install_has_anticheat(&s2.0.join("nope")));
 
         assert!(ONLINE_ANTICHEAT_APPIDS.iter().any(|(id, _)| *id == 3240220));
+        assert!(ONLINE_ANTICHEAT_APPIDS.iter().any(|(id, _)| *id == 271590));
+    }
+
+    #[test]
+    fn anticheat_warning_needs_a_known_game_or_detected_plus_online() {
+        // Known list always warns, whatever the lookup says.
+        assert!(should_warn_anticheat(true, false, None));
+        assert!(should_warn_anticheat(true, false, Some(false)));
+        // Detected anti-cheat warns only when online play is confirmed.
+        assert!(should_warn_anticheat(false, true, Some(true)));
+        assert!(!should_warn_anticheat(false, true, Some(false)));
+        assert!(!should_warn_anticheat(false, true, None));
+        // Online with no anti-cheat, or neither: no warning.
+        assert!(!should_warn_anticheat(false, false, Some(true)));
+        assert!(!should_warn_anticheat(false, false, None));
     }
 
     /// Live end-to-end check against a real running game + trainer (GTA San
