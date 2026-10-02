@@ -1,6 +1,8 @@
 use crate::steam;
 use anyhow::{anyhow, Context, Result};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 /// Everything needed to launch a trainer against the currently running game.
 pub struct LaunchTarget {
@@ -277,6 +279,28 @@ impl DotnetStatus {
             && self.crt_present
             && self.release.is_some_and(|r| r >= DOTNET_462_RELEASE)
     }
+
+    /// One-line prefix health status, e.g. for the setup dialog and the
+    /// failure diagnosis: either ready, or exactly which pieces are missing.
+    pub fn summary(&self) -> String {
+        if self.is_usable() {
+            return ".NET runtime ready".to_string();
+        }
+        let mut missing: Vec<&str> = Vec::new();
+        if !self.clr_present {
+            missing.push("clr.dll");
+        }
+        if !self.mscoree_native {
+            missing.push("native mscoree.dll");
+        }
+        if !self.crt_present {
+            missing.push("CLR support libraries");
+        }
+        if !self.release.is_some_and(|r| r >= DOTNET_462_RELEASE) {
+            missing.push("a .NET 4.6.2+ registry entry");
+        }
+        format!(".NET runtime not usable (missing {})", missing.join(", "))
+    }
 }
 
 /// Case-insensitive lookup — the .NET installer and our own copies disagree on
@@ -342,6 +366,12 @@ pub fn dotnet_status(prefix: &Path) -> DotnetStatus {
 /// component is logged because they fail independently — a prefix can have a
 /// real mscoree.dll and a 4.8 registry while still missing the CRT files.
 pub fn has_usable_dotnet(target: &LaunchTarget) -> bool {
+    prefix_health(target).0
+}
+
+/// `has_usable_dotnet`'s check, also returning the one-line status shown to
+/// the user before a launch that can't proceed.
+pub fn prefix_health(target: &LaunchTarget) -> (bool, String) {
     let s = dotnet_status(&target.prefix_dir());
     let usable = s.is_usable();
     crate::applog::log(&format!(
@@ -353,7 +383,7 @@ pub fn has_usable_dotnet(target: &LaunchTarget) -> bool {
         s.release
             .map_or_else(|| "absent".to_string(), |r| format!("{r} (need >= {DOTNET_462_RELEASE})")),
     ));
-    usable
+    (usable, s.summary())
 }
 
 /// Logs each `dosdevices/` drive-letter mapping in the prefix and whether its
@@ -426,6 +456,10 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
 
     log_dosdevices(target);
 
+    // Where this trainer's output starts in the shared log, so a failure
+    // diagnosis can read back just what it wrote (stderr goes to this file).
+    let log_offset = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+
     let proton = target.proton_dir.join("proton");
     crate::applog::log(&format!(
         "launch_trainer: {} runinprefix {} (STEAM_COMPAT_CLIENT_INSTALL_PATH={} STEAM_COMPAT_DATA_PATH={})",
@@ -454,6 +488,19 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     };
     let pid = child.id();
     crate::applog::log(&format!("launch_trainer: spawned pid {pid}"));
+    if let Ok(mut launches) = LAUNCHES.lock() {
+        launches.insert(
+            pid,
+            LaunchRecord {
+                started: std::time::Instant::now(),
+                log_path: log_path.to_path_buf(),
+                log_offset,
+                appid: target.appid,
+                compatdata_dir: target.compatdata_dir.clone(),
+                proton_dir: target.proton_dir.clone(),
+            },
+        );
+    }
 
     // Report back to the caller immediately (the toast shouldn't wait on
     // this) but keep watching in the background: FLiNG trainers unpack
@@ -501,6 +548,174 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     });
 
     Ok(pid)
+}
+
+/// What `launch_trainer` remembers about a launch, keyed by its process group
+/// id, so a trainer that dies right after starting can be diagnosed later.
+struct LaunchRecord {
+    started: std::time::Instant,
+    log_path: PathBuf,
+    log_offset: u64,
+    appid: u32,
+    compatdata_dir: PathBuf,
+    proton_dir: PathBuf,
+}
+
+static LAUNCHES: LazyLock<Mutex<HashMap<u32, LaunchRecord>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The most recent launch problem, shown in the troubleshoot dialog.
+static LAST_FAILURE: Mutex<Option<String>> = Mutex::new(None);
+
+/// A trainer whose whole process group is gone this soon after launch is
+/// treated as a failed launch (a healthy trainer stays up until closed).
+const EARLY_EXIT_SECS: u64 = 20;
+
+/// How much of the trainer's output (its stderr goes to the app log) is
+/// scanned for known failure signatures.
+const OUTPUT_TAIL_BYTES: u64 = 16 * 1024;
+
+pub fn record_failure(text: String) {
+    crate::applog::log(&format!("launch failure: {}", text.replace('\n', " | ")));
+    if let Ok(mut last) = LAST_FAILURE.lock() {
+        *last = Some(text);
+    }
+}
+
+pub fn last_failure() -> Option<String> {
+    LAST_FAILURE.lock().ok().and_then(|l| l.clone())
+}
+
+/// Facts gathered after an early exit, kept separate from the gathering so
+/// the reasoning can be tested.
+struct DiagInputs<'a> {
+    game_running: bool,
+    wineserver_proton: Option<&'a Path>,
+    launched_proton: &'a Path,
+    /// `Some(summary)` when the prefix's .NET is not usable.
+    dotnet_problem: Option<String>,
+    output: &'a str,
+}
+
+/// Likely causes of a trainer dying right after launch, most likely first.
+/// Empty means nothing obvious was found.
+fn likely_causes(i: &DiagInputs) -> Vec<String> {
+    let mut causes = Vec::new();
+    if !i.game_running {
+        causes.push(
+            "The game is no longer running. Start it, load past the menus, then launch the trainer again."
+                .to_string(),
+        );
+    }
+    let differs = i
+        .wineserver_proton
+        .is_some_and(|p| normalize_lexical(p) != normalize_lexical(i.launched_proton));
+    if differs || i.output.contains("version mismatch") {
+        causes.push(
+            "The trainer ran under a different Proton build than the game's wineserver. \
+             Close the game, start it again, then launch the trainer."
+                .to_string(),
+        );
+    }
+    if let Some(problem) = &i.dotnet_problem {
+        causes.push(format!("{problem}. Launch again to run the one-time setup."));
+    } else if i.output.contains("err:module:import_dll") {
+        causes.push(
+            "Wine could not load a library the trainer needs; the debug log has the details."
+                .to_string(),
+        );
+    }
+    causes
+}
+
+fn read_output_tail(path: &Path, offset: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = offset.max(len.saturating_sub(OUTPUT_TAIL_BYTES));
+    let mut buf = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_err() || file.take(OUTPUT_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Called once a tracked trainer's whole process group has exited. If that
+/// happened within `EARLY_EXIT_SECS` of launch and a likely cause is found,
+/// records it as the last failure and returns it (one cause per line).
+/// Reads /proc and the prefix, so call via `spawn_blocking`.
+pub fn check_early_exit(pgid: u32) -> Option<String> {
+    let rec = LAUNCHES.lock().ok()?.remove(&pgid)?;
+    let age = rec.started.elapsed().as_secs();
+    if age >= EARLY_EXIT_SECS {
+        return None;
+    }
+    crate::applog::log(&format!(
+        "check_early_exit: pgid {pgid} (AppId {}) gone {age}s after launch",
+        rec.appid
+    ));
+
+    let output = read_output_tail(&rec.log_path, rec.log_offset);
+    let dotnet = dotnet_status(&rec.compatdata_dir.join("pfx"));
+    let wineserver_proton = find_proton_dir_from_wineserver(&rec.compatdata_dir);
+    let causes = likely_causes(&DiagInputs {
+        game_running: find_running_appids().contains(&rec.appid),
+        wineserver_proton: wineserver_proton.as_deref(),
+        launched_proton: &rec.proton_dir,
+        dotnet_problem: (!dotnet.is_usable()).then(|| dotnet.summary()),
+        output: &output,
+    });
+    if causes.is_empty() {
+        crate::applog::log("check_early_exit: no obvious cause found");
+        return None;
+    }
+    let text = causes.join("\n");
+    record_failure(text.clone());
+    Some(text)
+}
+
+/// Games shipped with online modes where trainers risk an account ban. Kept
+/// to a handful of known titles; everything else is detected from the
+/// install folder (see `install_has_anticheat`).
+const ONLINE_ANTICHEAT_APPIDS: &[(u32, &str)] = &[
+    (3240220, "Grand Theft Auto V Enhanced"),
+    (271590, "Grand Theft Auto V Legacy"),
+];
+
+/// True if the game's top-level install folder ships an online anti-cheat
+/// (Easy Anti-Cheat or BattlEye). Best effort: a missing folder is just false.
+fn install_has_anticheat(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name().to_str().is_some_and(|n| {
+            let n = n.to_ascii_lowercase();
+            n.starts_with("easyanticheat") || n.starts_with("battleye")
+        })
+    })
+}
+
+static ANTICHEAT_NOTICED: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The game's name if it has online anti-cheat and the notice has not yet
+/// been shown for it this session. Marks it shown, so each game is warned
+/// about once per session.
+pub fn anticheat_notice(target: &LaunchTarget) -> Option<String> {
+    let known = ONLINE_ANTICHEAT_APPIDS
+        .iter()
+        .find(|(id, _)| *id == target.appid)
+        .map(|(_, name)| (*name).to_string());
+    let name = known.or_else(|| {
+        let libs = steam::library_folders(&target.client_dir);
+        let appid = target.appid.to_string();
+        let detected = steam::game_install_dir(&libs, &appid).is_some_and(|d| install_has_anticheat(&d));
+        detected.then(|| steam::game_name(&libs, &appid).unwrap_or_else(|| format!("AppId {}", target.appid)))
+    })?;
+    let first_time = ANTICHEAT_NOTICED.lock().ok()?.insert(target.appid);
+    first_time.then_some(name)
 }
 
 /// True if any *non-zombie* process currently belongs to process group
@@ -553,6 +768,10 @@ pub fn process_group_alive(pgid: u32) -> bool {
 /// then SIGKILL after a ~2s grace period if it hasn't exited. Blocks for up
 /// to that grace period — call via `spawn_blocking`, not on the GTK thread.
 pub fn stop_trainer(pgid: u32) {
+    // A trainer the user stopped is not a failed launch.
+    if let Ok(mut launches) = LAUNCHES.lock() {
+        launches.remove(&pgid);
+    }
     crate::applog::log(&format!("stop_trainer: SIGTERM -{pgid}"));
     let s = std::process::Command::new("kill").arg("-TERM").arg(format!("-{pgid}")).status();
     crate::applog::log(&format!("stop_trainer: kill -TERM -{pgid} -> {s:?}"));
@@ -1001,6 +1220,104 @@ mod tests {
     fn release_is_absent_when_only_dotnet40_is_installed() {
         let dotnet40 = SAMPLE.replace("\"Release\"=dword:00080eb1\n", "");
         assert_eq!(parse_dotnet_release(&dotnet40), None);
+    }
+
+    fn inputs<'a>(output: &'a str, proton: &'a Path) -> DiagInputs<'a> {
+        DiagInputs {
+            game_running: true,
+            wineserver_proton: Some(proton),
+            launched_proton: proton,
+            dotnet_problem: None,
+            output,
+        }
+    }
+
+    #[test]
+    fn healthy_inputs_give_no_cause() {
+        let p = PathBuf::from("/lib/Proton 9");
+        assert!(likely_causes(&inputs("", &p)).is_empty());
+    }
+
+    #[test]
+    fn game_gone_is_the_first_cause() {
+        let p = PathBuf::from("/lib/Proton 9");
+        let mut i = inputs("", &p);
+        i.game_running = false;
+        let causes = likely_causes(&i);
+        assert_eq!(causes.len(), 1);
+        assert!(causes[0].contains("no longer running"));
+    }
+
+    #[test]
+    fn proton_build_mismatch_is_detected_from_paths_and_from_output() {
+        let launched = PathBuf::from("/lib/Proton 9");
+        let server = PathBuf::from("/lib/Proton - Experimental");
+        let mut i = inputs("", &launched);
+        i.wineserver_proton = Some(&server);
+        assert!(likely_causes(&i)[0].contains("different Proton build"));
+
+        let same = inputs("wine client error:1c: version mismatch 800/805", &launched);
+        assert!(likely_causes(&same)[0].contains("different Proton build"));
+
+        // Same build spelled with a `..` component is not a mismatch.
+        let dotted = PathBuf::from("/lib/x/../Proton 9");
+        let mut i = inputs("", &launched);
+        i.wineserver_proton = Some(&dotted);
+        assert!(likely_causes(&i).is_empty());
+    }
+
+    #[test]
+    fn dotnet_problem_is_reported_with_its_summary() {
+        let p = PathBuf::from("/lib/Proton 9");
+        let mut i = inputs("", &p);
+        i.dotnet_problem = Some(".NET runtime not usable (missing clr.dll)".to_string());
+        let causes = likely_causes(&i);
+        assert!(causes[0].starts_with(".NET runtime not usable (missing clr.dll)"));
+    }
+
+    #[test]
+    fn dotnet_summary_names_what_is_missing() {
+        let ready = DotnetStatus {
+            clr_present: true,
+            mscoree_native: true,
+            crt_present: true,
+            release: Some(0x00080eb1),
+        };
+        assert_eq!(ready.summary(), ".NET runtime ready");
+        let broken = DotnetStatus {
+            clr_present: true,
+            mscoree_native: false,
+            crt_present: false,
+            release: Some(DOTNET_462_RELEASE - 1),
+        };
+        assert_eq!(
+            broken.summary(),
+            ".NET runtime not usable (missing native mscoree.dll, CLR support libraries, a .NET 4.6.2+ registry entry)"
+        );
+    }
+
+    #[test]
+    fn output_tail_reads_only_what_was_written_after_the_offset() {
+        let s = Scratch::new("tail");
+        let log = s.0.join("log.txt");
+        std::fs::write(&log, "old line\nnew line\n").unwrap();
+        assert_eq!(read_output_tail(&log, 9), "new line\n");
+        assert_eq!(read_output_tail(&s.0.join("missing"), 0), "");
+    }
+
+    #[test]
+    fn anticheat_is_detected_from_install_folder_and_known_list() {
+        let s = Scratch::new("anticheat");
+        assert!(!install_has_anticheat(&s.0));
+        std::fs::create_dir_all(s.0.join("EasyAntiCheat")).unwrap();
+        assert!(install_has_anticheat(&s.0));
+
+        let s2 = Scratch::new("battleye");
+        std::fs::create_dir_all(s2.0.join("BattlEye")).unwrap();
+        assert!(install_has_anticheat(&s2.0));
+        assert!(!install_has_anticheat(&s2.0.join("nope")));
+
+        assert!(ONLINE_ANTICHEAT_APPIDS.iter().any(|(id, _)| *id == 3240220));
     }
 
     /// Live end-to-end check against a real running game + trainer (GTA San

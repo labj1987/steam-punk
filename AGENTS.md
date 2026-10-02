@@ -33,9 +33,12 @@ which has been observed stale.
   gotcha below). Largest file in the app.
 - `library.rs` — trainer list persistence (`trainers.json`), per-trainer
   AppID metadata.
-- `gamedata.rs` — resolves a game's name and cover art from a Steam AppID
-  via the public Steam Store API/CDN (see caching design below).
-- `steam.rs` — locates the local Steam client install and library folders.
+- `gamedata.rs` — resolves a game's name and cover art from a Steam AppID,
+  local Steam data first and the public Steam Store API/CDN as the fallback
+  (see caching design below); also image-size probing and the trainer-name to
+  installed-game matcher.
+- `steam.rs` — locates the local Steam client installs (native and Flatpak),
+  library folders, and parses appmanifests (name, installdir, installed games).
 - `setup.rs` — the privileged one-time system-package setup (wine32:i386,
   winetricks) via `pkexec`: system
   packages need root, the winetricks install itself only touches the
@@ -68,8 +71,11 @@ succeeded.
 
 **AppID cover-art caching design.** A trainer's optional AppID association
 (set at import time, fully opt-in — reverses the original "no per-game
-association" decision from 0.1.0) drives a name/cover-art fetch from the
-public Steam Store API/CDN. This happens exactly once per AppID and is
+association" decision from 0.1.0) drives a name/cover-art lookup. The local
+Steam install is tried first (`appmanifest_<appid>.acf` name, and the portrait
+image in `appcache/librarycache/<appid>/` chosen by decoded dimensions, plus
+the old flat `<appid>_*` files, with header-style art as the fallback); the
+public Steam Store API/CDN fills in only what is missing. This happens exactly once per AppID and is
 cached to disk under `data_dir()/cache/` (`<appid>.name.txt`,
 `<appid>.jpg`), keyed by AppID rather than by trainer since multiple
 trainers can share one game. `gamedata::fetch_and_cache` treats a failed

@@ -3,6 +3,7 @@ use crate::gamedata;
 use crate::launcher::{self, LaunchTarget};
 use crate::library::{self, Trainer};
 use crate::setup;
+use crate::steam;
 
 use gtk4::prelude::*;
 use gtk4::{
@@ -188,7 +189,13 @@ pub fn build_ui(app: &Application) {
                 if let Some(cover_path) = &trainer.cover_path {
                     let picture = Picture::for_filename(cover_path);
                     picture.set_content_fit(ContentFit::Cover);
-                    picture.set_size_request(80, 45);
+                    // Portrait art (Steam's local library capsule) gets a
+                    // portrait slot instead of being cropped into a landscape one.
+                    let (pic_w, pic_h) = match gamedata::image_size(cover_path) {
+                        Some((w, h)) if h > w => (48, 72),
+                        _ => (80, 45),
+                    };
+                    picture.set_size_request(pic_w, pic_h);
                     picture.set_valign(Align::Center);
                     picture.add_css_class("card");
                     row.add_prefix(&picture);
@@ -300,6 +307,7 @@ pub fn build_ui(app: &Application) {
     {
         let running = running.clone();
         let refresh_list = refresh_list.clone();
+        let toast_overlay = toast_overlay.clone();
         // The /proc scan runs on a blocking thread, never the GTK thread; the
         // flag keeps a slow scan from stacking up overlapping ones.
         let in_flight = Rc::new(std::cell::Cell::new(false));
@@ -320,12 +328,16 @@ pub fn build_ui(app: &Application) {
             let running = running.clone();
             let refresh_list = refresh_list.clone();
             let in_flight = in_flight.clone();
+            let toast_overlay = toast_overlay.clone();
             spawn_async(
                 async move {
                     tokio::task::spawn_blocking(move || {
                         tracked
                             .into_iter()
                             .filter(|(_, pgid)| !launcher::process_group_alive(*pgid))
+                            // A trainer gone right after launch gets a
+                            // diagnosis (see launcher::check_early_exit).
+                            .map(|(path, pgid)| (path, pgid, launcher::check_early_exit(pgid)))
                             .collect::<Vec<_>>()
                     })
                     .await
@@ -336,7 +348,7 @@ pub fn build_ui(app: &Application) {
                     let mut changed = false;
                     {
                         let mut r = running.borrow_mut();
-                        for (path, pgid) in &exited {
+                        for (path, pgid, diagnosis) in &exited {
                             // Only if it's still the same launch (not stopped
                             // and relaunched while the scan ran).
                             if r.get(path) == Some(pgid) {
@@ -346,6 +358,11 @@ pub fn build_ui(app: &Application) {
                                 ));
                                 r.remove(path);
                                 changed = true;
+                                if let Some(cause) = diagnosis.as_ref().and_then(|d| d.lines().next()) {
+                                    toast_overlay.add_toast(Toast::new(&format!(
+                                        "Trainer exited right after launch. {cause} (more under Fix Stale Instance)"
+                                    )));
+                                }
                             }
                         }
                     }
@@ -609,6 +626,14 @@ fn prompt_appid_for_queue(
     search_entry.set_placeholder_text(Some("Search for a game, or enter a numeric AppID"));
     outer.append(&search_entry);
 
+    // Filled in (and shown) only if an installed game matches the trainer's
+    // name; the user still has to pick it.
+    let suggestion_list = ListBox::new();
+    suggestion_list.set_selection_mode(SelectionMode::None);
+    suggestion_list.add_css_class("boxed-list");
+    suggestion_list.set_visible(false);
+    outer.append(&suggestion_list);
+
     let results_list = ListBox::new();
     results_list.set_selection_mode(SelectionMode::None);
     results_list.add_css_class("boxed-list");
@@ -794,6 +819,39 @@ fn prompt_appid_for_queue(
     // Fire the initial search immediately with the guessed term, so results
     // are already present when the dialog opens.
     run_search(guessed_term.clone());
+
+    // Match the trainer's name against the games installed locally, off the
+    // GTK thread (it reads every appmanifest).
+    {
+        let stem = stem.clone();
+        let confirm = confirm.clone();
+        let suggestion_list = suggestion_list.clone();
+        spawn_async(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    gamedata::suggest_installed(&stem, &steam::all_installed_games())
+                })
+                .await
+            },
+            move |result| {
+                let Ok(Some((appid, name))) = result else { return };
+                let row = ActionRow::builder()
+                    .title(esc(&name))
+                    .subtitle(format!("Suggested from your installed games, AppID {appid}"))
+                    .activatable(true)
+                    .build();
+                let use_btn = Button::builder().label("Use").valign(Align::Center).build();
+                {
+                    let confirm = confirm.clone();
+                    use_btn.connect_clicked(move |_| confirm(appid));
+                }
+                row.add_suffix(&use_btn);
+                row.connect_activated(move |_| confirm(appid));
+                suggestion_list.append(&row);
+                suggestion_list.set_visible(true);
+            },
+        );
+    }
 
     {
         let dialog = dialog.clone();
@@ -984,29 +1042,71 @@ fn wire_launch_button(
                 let running = running.clone();
                 let refresh_slot = refresh_slot.clone();
                 let dialog_window = dialog_window.clone();
-                // has_usable_dotnet parses the prefix's whole system.reg
-                // (several MB) — keep it off the GTK thread.
+                // The prefix health check parses the prefix's whole
+                // system.reg (several MB) — keep it off the GTK thread. The
+                // anti-cheat lookup reads the game's install folder.
                 spawn_async(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            let usable = launcher::has_usable_dotnet(&target);
-                            (target, usable)
+                            let (usable, health) = launcher::prefix_health(&target);
+                            let notice = launcher::anticheat_notice(&target);
+                            (target, usable, health, notice)
                         })
                         .await
                     },
                     move |result| match result {
-                        Ok((target, true)) => {
-                            launch_trainer_now(target, trainer, toasts, running, refresh_slot, guard)
+                        Ok((target, usable, health, notice)) => {
+                            let window = dialog_window.clone();
+                            let proceed: Box<dyn FnOnce()> = Box::new(move || {
+                                if usable {
+                                    launch_trainer_now(target, trainer, toasts, running, refresh_slot, guard)
+                                } else {
+                                    show_dotnet_dialog(
+                                        &window, target, trainer, toasts, running, refresh_slot, guard,
+                                        &health,
+                                    )
+                                }
+                            });
+                            match notice {
+                                Some(game) => show_anticheat_dialog(&dialog_window, &game, proceed),
+                                None => proceed(),
+                            }
                         }
-                        Ok((target, false)) => show_dotnet_dialog(
-                            &dialog_window, target, trainer, toasts, running, refresh_slot, guard,
-                        ),
                         Err(e) => toasts.add_toast(Toast::new(&format!("Task error: {e}"))),
                     },
                 );
             }),
         );
     });
+}
+
+/// One-time-per-session warning for games with an online anti-cheat. Runs
+/// `on_continue` only if the user chooses to launch anyway; cancelling drops
+/// it, which also releases the pending-launch marker it holds.
+type Continuation = Rc<RefCell<Option<Box<dyn FnOnce()>>>>;
+
+fn show_anticheat_dialog(window: &ApplicationWindow, game: &str, on_continue: Box<dyn FnOnce()>) {
+    let dialog = AlertDialog::builder()
+        .heading("Online Anti-Cheat")
+        .body(format!(
+            "{game} has an online mode with anti-cheat. Use trainers in single-player \
+only; using one online can get your account banned."
+        ))
+        .build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("launch", "Launch Anyway")]);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let slot: Continuation = Rc::new(RefCell::new(Some(on_continue)));
+    dialog.connect_response(None, move |_dialog, response| {
+        let callback = slot.borrow_mut().take();
+        if response == "launch" {
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    });
+    dialog.present(Some(window));
 }
 
 /// Launch a trainer against an already-resolved target, off the main
@@ -1048,7 +1148,10 @@ fn launch_trainer_now(
                     refresh();
                 }
             }
-            Ok(Err(e)) => toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}"))),
+            Ok(Err(e)) => {
+                launcher::record_failure(format!("Could not start the trainer through Proton: {e:#}"));
+                toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}")));
+            }
             Err(e) => toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}"))),
         },
     );
@@ -1113,6 +1216,7 @@ fn manual_commands(target: &LaunchTarget) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show_dotnet_dialog(
     window: &ApplicationWindow,
     target: LaunchTarget,
@@ -1121,6 +1225,7 @@ fn show_dotnet_dialog(
     running: RunningMap,
     refresh_slot: RefreshSlot,
     guard: Rc<PendingLaunch>,
+    health: &str,
 ) {
     // The privileged setup script is apt-only; elsewhere offer just the
     // manual command list rather than a password prompt that then fails.
@@ -1133,6 +1238,7 @@ will run. This will ask for your password once, then take a minute or two."
 will run. Automatic setup is only available on Debian/Ubuntu-based systems; run the \
 commands below yourself, then launch the trainer again."
     };
+    let body = format!("{body}\n\nPrefix check: {health}.");
 
     let commands_label = Label::new(Some(&manual_commands(&target)));
     commands_label.set_wrap(true);
@@ -1156,7 +1262,7 @@ commands below yourself, then launch the trainer again."
 
     let dialog = AlertDialog::builder()
         .heading("One-Time Setup Needed")
-        .body(body)
+        .body(&body)
         .extra_child(&disclosure_list)
         .build();
     if automatic {
@@ -1271,7 +1377,8 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
             let toast_overlay = toast_overlay.clone();
 
             let dirs = launcher::trainer_log_dirs(&target);
-            if dirs.is_empty() {
+            let failure = launcher::last_failure();
+            if dirs.is_empty() && failure.is_none() {
                 toast_overlay.add_toast(Toast::new("No trainer logs found for the running game"));
                 return;
             }
@@ -1288,10 +1395,24 @@ fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
             outer.set_margin_start(12);
             outer.set_margin_end(12);
 
-            let hint = Label::new(Some(
+            if let Some(failure) = &failure {
+                let heading = Label::new(Some("Likely cause of the last failed launch"));
+                heading.add_css_class("heading");
+                heading.set_xalign(0.0);
+                outer.append(&heading);
+                let cause = Label::new(Some(failure));
+                cause.set_wrap(true);
+                cause.set_xalign(0.0);
+                cause.set_selectable(true);
+                outer.append(&cause);
+            }
+
+            let hint = Label::new(Some(if dirs.is_empty() {
+                "No trainer log folders were found for the running game."
+            } else {
                 "If a trainer refuses to start, claiming a previous instance is running, \
-                 clear its log folder below, then relaunch.",
-            ));
+                 clear its log folder below, then relaunch."
+            }));
             hint.set_wrap(true);
             hint.set_xalign(0.0);
             outer.append(&hint);

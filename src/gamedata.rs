@@ -4,7 +4,7 @@
 //! app launch.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -64,21 +64,298 @@ pub fn cached_cover(appid: u32) -> Option<PathBuf> {
 /// The name fetch failing is a real error (nothing to show). The cover
 /// fetch failing is logged but not propagated — a game with a name and no
 /// art is still strictly better than falling back to the filename.
+///
+/// Local Steam data is tried first: the name from the game's appmanifest and
+/// the cover from Steam's own library art cache, so an installed game needs no
+/// network at all. Only what the local lookup could not supply is fetched.
 pub async fn fetch_and_cache(appid: u32) -> Result<()> {
     let dir = cache_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    let client = http_client()?;
+    let local = tokio::task::spawn_blocking(move || local_game_info(appid))
+        .await
+        .unwrap_or_default();
 
-    let details = fetch_appdetails(&client, appid).await?;
-    std::fs::write(name_cache_path(appid)?, &details.name)
+    let mut name = local.name;
+    let mut header_image: Option<String> = None;
+    let mut client: Option<reqwest::Client> = None;
+
+    if name.is_none() || local.cover.is_none() {
+        let c = http_client()?;
+        match fetch_appdetails(&c, appid).await {
+            Ok(details) => {
+                if name.is_none() {
+                    name = Some(details.name);
+                }
+                header_image = details.header_image;
+            }
+            Err(e) if name.is_some() => {
+                crate::applog::log(&format!("gamedata: appdetails failed for AppID {appid}: {e}"));
+            }
+            Err(e) => return Err(e),
+        }
+        client = Some(c);
+    }
+
+    let name = name.with_context(|| format!("no name found for AppID {appid}"))?;
+    std::fs::write(name_cache_path(appid)?, &name)
         .with_context(|| format!("caching name for AppID {appid}"))?;
 
-    if let Err(e) = fetch_cover(&client, appid, details.header_image.as_deref()).await {
+    if let Some(src) = &local.cover {
+        match cache_local_cover(src, appid) {
+            Ok(()) => {
+                crate::applog::log(&format!(
+                    "gamedata: using local Steam cover art {} for AppID {appid}",
+                    src.display()
+                ));
+                return Ok(());
+            }
+            Err(e) => crate::applog::log(&format!(
+                "gamedata: could not use local cover art for AppID {appid}: {e}"
+            )),
+        }
+    }
+
+    let client = match client {
+        Some(c) => c,
+        None => http_client()?,
+    };
+    if let Err(e) = fetch_cover(&client, appid, header_image.as_deref()).await {
         crate::applog::log(&format!("gamedata: cover art fetch failed for AppID {appid}: {e}"));
     }
 
     Ok(())
+}
+
+fn cache_local_cover(src: &Path, appid: u32) -> Result<()> {
+    let len = std::fs::metadata(src)?.len();
+    if len > MAX_IMAGE_BYTES as u64 {
+        anyhow::bail!("{} is larger than {MAX_IMAGE_BYTES} bytes", src.display());
+    }
+    std::fs::copy(src, cover_cache_path(appid)?)
+        .with_context(|| format!("caching local cover art for AppID {appid}"))?;
+    Ok(())
+}
+
+/// What the local Steam install knows about a game.
+#[derive(Default)]
+struct LocalInfo {
+    name: Option<String>,
+    cover: Option<PathBuf>,
+}
+
+fn local_game_info(appid: u32) -> LocalInfo {
+    local_game_info_in(&crate::steam::metadata_roots(), appid)
+}
+
+/// Best effort across every Steam install in `roots`: the first manifest name
+/// and the first usable cover found. Missing files just mean `None`.
+fn local_game_info_in(roots: &[PathBuf], appid: u32) -> LocalInfo {
+    let mut info = LocalInfo::default();
+    for root in roots {
+        if info.name.is_none() {
+            let libs = crate::steam::library_folders(root);
+            info.name = crate::steam::game_name(&libs, &appid.to_string());
+        }
+        if info.cover.is_none() {
+            info.cover = local_cover(root, appid);
+        }
+        if info.name.is_some() && info.cover.is_some() {
+            break;
+        }
+    }
+    info
+}
+
+/// Image width and height from a JPEG or PNG header, without decoding it.
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const PNG_SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.starts_with(PNG_SIG) {
+        if bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+            return None;
+        }
+        let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+        return Some((w, h));
+    }
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        match marker {
+            0xFF => {
+                i += 1;
+                continue;
+            }
+            // Standalone markers carry no length.
+            0x01 | 0xD0..=0xD8 => {
+                i += 2;
+                continue;
+            }
+            0xD9 => return None,
+            _ => {}
+        }
+        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        // SOF0..SOF15 except DHT (C4), JPG (C8) and DAC (CC).
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            if i + 9 > bytes.len() {
+                return None;
+            }
+            let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+            return Some((w, h));
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Dimensions of an image file, reading only its first 128 KB.
+pub fn image_size(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(128 * 1024)
+        .read_to_end(&mut buf)
+        .ok()?;
+    image_dimensions(&buf)
+}
+
+/// The portrait image closest to Steam's 600x900 library capsule, if any
+/// candidate is taller than it is wide.
+fn pick_portrait(candidates: &[(PathBuf, u32, u32)]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter(|(_, w, h)| h > w)
+        .min_by_key(|(_, w, h)| w.abs_diff(600) + h.abs_diff(900))
+        .map(|(p, _, _)| p.clone())
+}
+
+/// Header-style art: a modest landscape image (about 460x215 or 600x338).
+/// Heroes (1920 wide) and square icons are deliberately not matched.
+fn pick_header(candidates: &[(PathBuf, u32, u32)]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter(|(_, w, h)| *h > 0 && *w <= 800 && (*w as f32 / *h as f32) >= 1.5 && (*w as f32 / *h as f32) <= 2.5)
+        .min_by_key(|(_, w, h)| w.abs_diff(460) + h.abs_diff(215))
+        .map(|(p, _, _)| p.clone())
+}
+
+fn is_image_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png"))
+}
+
+/// Image files under `dir`, descending at most `depth` levels (Steam's newer
+/// layout nests hashed folders under the per-AppID folder).
+fn collect_images(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth > 0 {
+                collect_images(&path, depth - 1, out);
+            }
+        } else if is_image_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// Cover art for `appid` from Steam's local library cache under `root`:
+/// the per-AppID folder (hashed file names, so identified by decoded
+/// dimensions) plus the older flat `<appid>_*` files. Prefers a portrait
+/// image, then header art.
+fn local_cover(root: &Path, appid: u32) -> Option<PathBuf> {
+    let cache = root.join("appcache/librarycache");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_images(&cache.join(appid.to_string()), 2, &mut files);
+    let prefix = format!("{appid}_");
+    if let Ok(entries) = std::fs::read_dir(&cache) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let flat = path.is_file()
+                && is_image_file(&path)
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix));
+            if flat {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+
+    let candidates: Vec<(PathBuf, u32, u32)> = files
+        .into_iter()
+        .filter_map(|p| image_size(&p).map(|(w, h)| (p, w, h)))
+        .collect();
+    pick_portrait(&candidates).or_else(|| pick_header(&candidates))
+}
+
+/// Normalizes a title for comparison: lowercase alphanumeric words, with
+/// "the" dropped so "The Witcher 3" and "Witcher 3" line up.
+fn title_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty() && *t != "the")
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Suggests the installed game a trainer is probably for, from the trainer's
+/// filename stem. Conservative on purpose: only a title that matches after
+/// normalization, or one that differs by a token in a long title, counts, and
+/// an ambiguous best match yields nothing. "Grand Theft Auto V" must not be
+/// suggested for a "Grand Theft Auto V Enhanced" trainer.
+pub fn suggest_installed(stem: &str, installed: &[(u32, String)]) -> Option<(u32, String)> {
+    let wanted = title_tokens(&guess_search_term(stem));
+    if wanted.is_empty() {
+        return None;
+    }
+    let wanted_set: std::collections::HashSet<&String> = wanted.iter().collect();
+
+    let mut best: Option<(f32, u32, &String)> = None;
+    let mut ambiguous = false;
+    for (appid, name) in installed {
+        let tokens = title_tokens(name);
+        if tokens.is_empty() {
+            continue;
+        }
+        let score = if tokens == wanted {
+            1.0
+        } else {
+            let set: std::collections::HashSet<&String> = tokens.iter().collect();
+            let inter = set.intersection(&wanted_set).count() as f32;
+            let union = set.union(&wanted_set).count() as f32;
+            inter / union
+        };
+        if score < 0.85 {
+            continue;
+        }
+        match best {
+            Some((s, id, _)) if score < s || (score == s && id == *appid) => {}
+            Some((s, _, _)) if score == s => ambiguous = true,
+            _ => {
+                best = Some((score, *appid, name));
+                ambiguous = false;
+            }
+        }
+    }
+    if ambiguous {
+        return None;
+    }
+    best.map(|(_, id, name)| (id, name.clone()))
 }
 
 struct AppDetails {
@@ -299,7 +576,14 @@ pub fn guess_search_term(filename_stem: &str) -> String {
         None => filename_stem.to_string(),
     };
 
-    strip_early_access(&base)
+    let stripped = strip_early_access(&base);
+    let mut words: Vec<&str> = stripped.split_whitespace().collect();
+    // A stem with no version or count ("Some Game Trainer") keeps the word
+    // "Trainer", which only hurts a title search or comparison.
+    if words.len() > 1 && words.last().is_some_and(|w| w.eq_ignore_ascii_case("trainer")) {
+        words.pop();
+    }
+    words.join(" ")
 }
 
 fn strip_early_access(s: &str) -> String {
@@ -323,6 +607,7 @@ fn strip_early_access(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::guess_search_term;
+    use std::path::PathBuf;
 
     #[test]
     fn strips_version_and_plus_count() {
@@ -397,6 +682,165 @@ mod tests {
         for r in &results {
             println!("  {} {}", r.appid, r.name);
         }
+    }
+
+    /// Header-only JPEG: SOI, a JFIF APP0 segment, then SOF0 with the size.
+    fn fake_jpeg(w: u16, h: u16) -> Vec<u8> {
+        let mut b = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        b.extend_from_slice(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+        b.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&[0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        b
+    }
+
+    /// Header-only PNG: signature plus an IHDR chunk with the size.
+    fn fake_png(w: u32, h: u32) -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&[8, 6, 0, 0, 0]);
+        b
+    }
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "steam-punk-gamedata-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ));
+            std::fs::create_dir_all(&p).expect("scratch dir");
+            Self(p)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn reads_jpeg_and_png_dimensions() {
+        assert_eq!(super::image_dimensions(&fake_jpeg(600, 900)), Some((600, 900)));
+        assert_eq!(super::image_dimensions(&fake_png(1920, 620)), Some((1920, 620)));
+        assert_eq!(super::image_dimensions(b"GIF89a not supported"), None);
+        assert_eq!(super::image_dimensions(&[0xFF, 0xD8, 0xFF]), None);
+        assert_eq!(super::image_dimensions(&[]), None);
+    }
+
+    #[test]
+    fn portrait_pick_prefers_600x900_and_ignores_landscape() {
+        let c = vec![
+            (PathBuf::from("hero.jpg"), 1920, 620),
+            (PathBuf::from("header.jpg"), 460, 215),
+            (PathBuf::from("small.jpg"), 300, 450),
+            (PathBuf::from("capsule.jpg"), 600, 900),
+        ];
+        assert_eq!(super::pick_portrait(&c), Some(PathBuf::from("capsule.jpg")));
+        assert_eq!(super::pick_portrait(&c[..2]), None);
+        assert_eq!(super::pick_header(&c), Some(PathBuf::from("header.jpg")));
+        assert_eq!(super::pick_header(&c[..1]), None);
+    }
+
+    #[test]
+    fn local_cover_scans_hashed_subfolders_by_dimensions() {
+        let s = Scratch::new("hashed");
+        let dir = s.0.join("appcache/librarycache/3240220");
+        std::fs::create_dir_all(dir.join("0a1b2c3d")).unwrap();
+        std::fs::write(dir.join("0a1b2c3d/9f8e7d.jpg"), fake_jpeg(1920, 620)).unwrap();
+        std::fs::write(dir.join("4e5f6a.jpg"), fake_jpeg(600, 900)).unwrap();
+        std::fs::write(dir.join("logo.png"), fake_png(640, 360)).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
+
+        assert_eq!(super::local_cover(&s.0, 3240220), Some(dir.join("4e5f6a.jpg")));
+    }
+
+    #[test]
+    fn local_cover_accepts_old_flat_names_and_falls_back_to_header() {
+        let s = Scratch::new("flat");
+        let cache = s.0.join("appcache/librarycache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("42_library_600x900.jpg"), fake_jpeg(600, 900)).unwrap();
+        std::fs::write(cache.join("42_header.jpg"), fake_jpeg(460, 215)).unwrap();
+        std::fs::write(cache.join("43_header.jpg"), fake_jpeg(460, 215)).unwrap();
+        std::fs::write(cache.join("420_library_600x900.jpg"), fake_jpeg(600, 900)).unwrap();
+
+        assert_eq!(super::local_cover(&s.0, 42), Some(cache.join("42_library_600x900.jpg")));
+        assert_eq!(super::local_cover(&s.0, 43), Some(cache.join("43_header.jpg")));
+        assert_eq!(super::local_cover(&s.0, 44), None);
+    }
+
+    #[test]
+    fn local_info_reads_name_and_cover_from_a_steam_root() {
+        let s = Scratch::new("info");
+        std::fs::create_dir_all(s.0.join("steamapps")).unwrap();
+        std::fs::write(
+            s.0.join("steamapps/appmanifest_7.acf"),
+            "\"AppState\"\n{\n\t\"appid\"\t\"7\"\n\t\"name\"\t\"Seven\"\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(s.0.join("appcache/librarycache/7")).unwrap();
+        std::fs::write(s.0.join("appcache/librarycache/7/x.jpg"), fake_jpeg(600, 900)).unwrap();
+
+        let info = super::local_game_info_in(std::slice::from_ref(&s.0), 7);
+        assert_eq!(info.name.as_deref(), Some("Seven"));
+        assert!(info.cover.is_some());
+        let none = super::local_game_info_in(std::slice::from_ref(&s.0), 8);
+        assert!(none.name.is_none() && none.cover.is_none());
+        assert!(super::local_game_info_in(&[], 7).name.is_none());
+    }
+
+    fn games() -> Vec<(u32, String)> {
+        vec![
+            (271590, "Grand Theft Auto V Legacy".to_string()),
+            (3240220, "Grand Theft Auto V Enhanced".to_string()),
+            (1245620, "ELDEN RING".to_string()),
+            (1, "The Witcher 3: Wild Hunt".to_string()),
+            (2, "Hades".to_string()),
+            (3, "Hades II".to_string()),
+        ]
+    }
+
+    #[test]
+    fn suggests_the_installed_game_for_typical_trainer_names() {
+        let g = games();
+        let id = |stem: &str| super::suggest_installed(stem, &g).map(|(id, _)| id);
+        assert_eq!(id("Elden Ring v1.16 Plus 25 Trainer"), Some(1245620));
+        assert_eq!(id("Elden Ring Trainer"), Some(1245620));
+        assert_eq!(id("Witcher 3 Wild Hunt v4.04 Plus 12 Trainer"), Some(1));
+        assert_eq!(id("Grand Theft Auto V Enhanced v1.0.811 Plus 22 Trainer"), Some(3240220));
+        assert_eq!(id("Hades II Early Access v1.0 Plus 5 Trainer"), Some(3));
+        assert_eq!(id("Hades v1.38 Plus 8 Trainer"), Some(2));
+    }
+
+    #[test]
+    fn suggests_nothing_when_unsure() {
+        let g = games();
+        assert_eq!(super::suggest_installed("Crimson Desert v1.0 Plus 12 Trainer", &g), None);
+        assert_eq!(super::suggest_installed("", &g), None);
+        // Only the legacy game installed: the Enhanced trainer must not match it.
+        let legacy_only = vec![(271590, "Grand Theft Auto V".to_string())];
+        assert_eq!(
+            super::suggest_installed("Grand Theft Auto V Enhanced v1.0 Plus 22 Trainer", &legacy_only),
+            None
+        );
+        // Two different installs with the same title is ambiguous.
+        let dup = vec![(10, "Same Game".to_string()), (11, "Same Game".to_string())];
+        assert_eq!(super::suggest_installed("Same Game Trainer", &dup), None);
+    }
+
+    #[test]
+    fn trailing_trainer_word_is_dropped_from_the_search_term() {
+        assert_eq!(guess_search_term("Some Game Trainer"), "Some Game");
+        assert_eq!(guess_search_term("Trainer"), "Trainer");
     }
 
     #[test]

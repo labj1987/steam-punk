@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 — 2026-10-02
+
+- Game names and cover art now come from your local Steam install first: the
+  name from the game's `appmanifest` (across all libraries, native and Flatpak
+  Steam) and the cover from Steam's `appcache/librarycache`, picking the
+  portrait image by its real dimensions (both the newer per-game folders and
+  the older flat file names are read). The Steam Store API/CDN is only used
+  for whatever is missing locally, so installed games need no network.
+  Portrait covers get a portrait slot in the list.
+- Importing a trainer now suggests the installed game it most likely belongs
+  to (matched from the trainer's file name against your installed games) in
+  the AppID step; you still confirm it. A trailing "Trainer" is no longer left
+  in the pre-filled search.
+- One-time-per-session warning when launching against a game with an online
+  anti-cheat (GTA V Enhanced and Legacy, or any game whose install folder
+  ships Easy Anti-Cheat or BattlEye): use trainers in single-player only,
+  online use can get an account banned.
+- Failed launches are diagnosed: if a trainer's process group is gone within
+  20 seconds of launch, the app checks whether the game stopped running,
+  whether the trainer used a different Proton build than the game's
+  wineserver, and whether the prefix's .NET is usable, then shows the likely
+  cause in a toast and in the Fix Stale Instance dialog. The result is also
+  written to the debug log.
+- The one-time setup dialog now starts with a one-line prefix check naming
+  exactly which .NET pieces are missing.
+
 ## 0.4.10 — 2026-09-24
 
 - Removed the pre-rename compatibility: releases no longer publish legacy

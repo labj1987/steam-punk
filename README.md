@@ -40,6 +40,14 @@ actual running `wineserver` process rather than trusting `compatdata`'s
 2. Drag a trainer `.exe` onto the window (or use the + button) to import it.
 3. Click Launch on the trainer's row. A running trainer shows a live badge and a Stop button in its place.
 
+Game names and cover art come from your local Steam install (including
+Flatpak Steam) when available, and from the public Steam Store otherwise. On
+import, the app suggests the installed game that matches the trainer's file
+name. Games with an online anti-cheat get a one-time warning: use trainers in
+single-player only. If a trainer dies right after launch, the likely cause
+(game closed, different Proton build, missing .NET) is shown under Fix Stale
+Instance.
+
 If the game's prefix doesn't have a real .NET Framework 4.6.2 or newer yet
 (required by current WPF-based trainers, and never provided by Proton's
 bundled wine-mono), the app offers a one-time setup. It first tries to copy a
