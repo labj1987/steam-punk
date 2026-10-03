@@ -77,6 +77,10 @@ No trainer downloading/update-checking, no SLR/pressure-vessel/umu
 integration, no per-game trainer database. (The app does modify a game's
 prefix, but only to repair a missing .NET runtime, and only on request.)
 
+## Acknowledgements
+
+Development assistance: Claude Code (Anthropic) and Codex (OpenAI).
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).

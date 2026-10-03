@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — 2026-10-02
+
+- The About dialog and README credit Codex (OpenAI) again, alongside Claude Code (Anthropic).
+
 ## 0.5.0 — 2026-10-02
 
 - Game names and cover art now come from your local Steam install first: the

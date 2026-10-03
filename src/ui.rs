@@ -505,7 +505,7 @@ pub fn build_ui(app: &Application) {
                      Steam game's wine session.",
                 )
                 .build();
-            dialog.add_acknowledgement_section(Some("Built with"), &["Claude Code (Anthropic)"]);
+            dialog.add_acknowledgement_section(Some("Built with"), &["Claude Code (Anthropic)", "Codex (OpenAI)"]);
             dialog.present(Some(&window));
         });
     }
