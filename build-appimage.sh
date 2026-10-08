@@ -50,16 +50,10 @@ chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"
 cp data/$APP-256.png                                    "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP.png"
 cp data/io.github.labj1987.SteamPunk.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
+# The <releases> list is generated from CHANGELOG.md's version headings, and fails the
+# build if the newest one is not this Cargo.toml version.
+python3 scripts/sync_appdata_releases.py
 cp data/io.github.labj1987.SteamPunk.appdata.xml   "$APPDIR/usr/share/metainfo/"
-
-# Make sure the appdata <releases> list starts with the version being built
-# (taken from Cargo.toml), dated from its CHANGELOG heading when there is one.
-APPDATA="$APPDIR/usr/share/metainfo/io.github.labj1987.SteamPunk.appdata.xml"
-if ! grep -q "<release version=\"$VERSION\"" "$APPDATA"; then
-    REL_DATE="$(grep -m1 "^## $VERSION " CHANGELOG.md | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' || true)"
-    REL_DATE="${REL_DATE:-$(date -u +%F)}"
-    sed -i "s|<releases>|<releases>\n    <release version=\"$VERSION\" date=\"$REL_DATE\"/>|" "$APPDATA"
-fi
 
 # Top-level AppImage requirements
 cp data/$APP.desktop "$APPDIR/"

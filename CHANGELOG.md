@@ -1,5 +1,9 @@
 # Changelog
 
+One `## <version> — <date>` heading per released version, newest first. A release's page
+carries its section as written, and the AppStream `<releases>` list is generated from these
+headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
+
 ## 0.5.1 — 2026-10-02
 
 - The About dialog and README credit Codex (OpenAI) again, alongside Claude Code (Anthropic).
@@ -92,7 +96,7 @@
   before writing, which covers read-only files and Proton's builtin symlinks
   with the same rule.
 
-## 0.4.6 — 2026-09-17
+### Built as 0.4.6
 
 - Fixed the .NET repair silently aborting partway, which left a prefix that
   looked repaired but could never run a trainer. A Proton prefix ships its
@@ -340,6 +344,8 @@ logs are migrated automatically from `~/.local/share/proton-trainer` to
   backend. The AboutDialog/Dialog conversions and `StartupNotify=true`
   from 0.1.1–0.1.5 were reasonable but orthogonal — this is the actual
   fix.
+
+## 0.1.5 — 2026-08-04
 
 - The 0.1.1/0.1.3/0.1.4 fixes addressed real GTK-window-subclass dialogs
   but the phantom dock icon persisted immediately at launch, before any

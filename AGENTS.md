@@ -107,14 +107,31 @@ just means the caller falls back to the trainer's filename-derived title.
 ## Release process
 
 1. Bump `version` in `Cargo.toml`.
-2. Add a `CHANGELOG.md` entry and an appdata `<release>` (the build also
-   inserts the current version if it is missing).
-3. Commit, push to `main`.
-4. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-5. The tag push triggers `.github/workflows/release.yml` ("Build and
-   Release"), which checks the tag matches `Cargo.toml`, runs
-   `cargo test`, then `build-appimage.sh`, and uploads the AppImage
-   (+ `.zsync`) to a GitHub Release via `softprops/action-gh-release`.
+2. Add a `CHANGELOG.md` entry (see Changelog below).
+3. Run `python3 scripts/sync_appdata_releases.py` to regenerate the
+   appdata `<releases>` list; the release workflow fails if it is out of
+   date.
+4. Commit, push to `main`.
+5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+6. The tag push triggers `.github/workflows/release.yml` ("Build and
+   Release"), which checks the tag matches `Cargo.toml` and the changelog,
+   runs `cargo test`, then `build-appimage.sh`, and uploads the AppImage
+   (+ `.zsync`) to a GitHub Release via `softprops/action-gh-release`,
+   with that version's changelog section as the release text.
+
+## Changelog
+
+- One `## X.Y.Z — YYYY-MM-DD` heading per released version, newest
+  first. No entries for builds that were never released.
+- Write each entry for the people using the app: what changed for them
+  and anything they need to do. Leave out implementation detail (file
+  paths, flags, internal names, CI and packaging changes) unless a user
+  needs it to act.
+- The release page is the version's section written out in full
+  (`scripts/release_notes.py`), never a link to the changelog. The
+  release fails if the section is missing.
+- The appdata `<releases>` list is generated from the headings
+  (`scripts/sync_appdata_releases.py`). Don't edit it by hand.
 
 ## Conventions
 

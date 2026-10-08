@@ -27,6 +27,10 @@ jobs:
             exit 1
           fi
 
+      # Steam Punk has no CI workflow, so the changelog checks run here, before anything is built.
+      - name: AppStream releases match the changelog
+        run: python3 scripts/sync_appdata_releases.py --check && python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "${GITHUB_REF_NAME}" > /dev/null
+
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq || true
@@ -42,9 +46,13 @@ jobs:
       - name: Build AppImage
         run: sudo -E env "PATH=$PATH" bash build-appimage.sh
 
+      # The release page carries this version's changes in full, from CHANGELOG.md: no link to it.
+      - name: Release notes from the changelog
+        run: python3 scripts/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md && cat release-notes.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           files: |
             steam-punk-*-x86_64.AppImage*
-          generate_release_notes: true
+          body_path: release-notes.md
