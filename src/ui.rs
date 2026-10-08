@@ -12,12 +12,16 @@ use gtk4::{
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Dialog as AdwDialog,
+    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Clamp, Dialog as AdwDialog,
     ExpanderRow, HeaderBar, ResponseAppearance, StatusPage, Toast, ToastOverlay,
 };
 
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// Cover-art slot in the trainer list, the shape of Steam's 460x215 header art.
+const COVER_WIDTH: i32 = 107;
+const COVER_HEIGHT: i32 = 50;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Async bridge: run a future on the shared Tokio runtime, deliver the result
@@ -86,23 +90,11 @@ pub fn build_ui(app: &Application) {
         .build();
     header.pack_start(&import_btn);
 
-    let stop_all_btn = Button::builder().label("Stop All").build();
-    header.pack_start(&stop_all_btn);
-
     let about_btn = Button::builder()
         .icon_name("help-about-symbolic")
         .tooltip_text("About")
         .build();
     header.pack_end(&about_btn);
-
-    let save_log_btn = Button::builder()
-        .icon_name("document-save-symbolic")
-        .tooltip_text("Save Debug Log")
-        .build();
-    header.pack_end(&save_log_btn);
-
-    let troubleshoot_btn = Button::builder().label("Fix Stale Instance").build();
-    header.pack_end(&troubleshoot_btn);
 
     // ── Stack: empty status page <-> trainer list ───────────────────────────
     let stack = Stack::new();
@@ -189,16 +181,19 @@ pub fn build_ui(app: &Application) {
                 if let Some(cover_path) = &trainer.cover_path {
                     let picture = Picture::for_filename(cover_path);
                     picture.set_content_fit(ContentFit::Cover);
-                    // Portrait art (Steam's local library capsule) gets a
-                    // portrait slot instead of being cropped into a landscape one.
-                    let (pic_w, pic_h) = match gamedata::image_size(cover_path) {
-                        Some((w, h)) if h > w => (48, 72),
-                        _ => (80, 45),
-                    };
-                    picture.set_size_request(pic_w, pic_h);
-                    picture.set_valign(Align::Center);
+                    // Every cover is Steam's landscape header art (460x215) in
+                    // one fixed slot. The size request is only a minimum: on
+                    // its own the picture grows into whatever width the title
+                    // leaves free, so the clamp caps it at the same width.
+                    picture.set_size_request(COVER_WIDTH, COVER_HEIGHT);
                     picture.add_css_class("card");
-                    row.add_prefix(&picture);
+                    let slot = Clamp::builder()
+                        .maximum_size(COVER_WIDTH)
+                        .tightening_threshold(COVER_WIDTH)
+                        .valign(Align::Center)
+                        .child(&picture)
+                        .build();
+                    row.add_prefix(&slot);
                 }
                 // A name or cover that's still missing — the initial fetch
                 // failed (e.g. imported offline), or an AppID whose guessed
@@ -360,7 +355,7 @@ pub fn build_ui(app: &Application) {
                                 changed = true;
                                 if let Some(cause) = diagnosis.as_ref().and_then(|d| d.lines().next()) {
                                     toast_overlay.add_toast(Toast::new(&format!(
-                                        "Trainer exited right after launch. {cause} (more under Fix Stale Instance)"
+                                        "Trainer exited right after launch. {cause}"
                                     )));
                                 }
                             }
@@ -452,44 +447,6 @@ pub fn build_ui(app: &Application) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    //  Stop All
-    // ─────────────────────────────────────────────────────────────────────────
-    {
-        let toast_overlay = toast_overlay.clone();
-        let running = running.clone();
-        let refresh_list = refresh_list.clone();
-        stop_all_btn.connect_clicked(move |_| {
-            let toast_overlay = toast_overlay.clone();
-            let running = running.clone();
-            let refresh_list = refresh_list.clone();
-            // Only real, tracked process groups; pgid 0 is a launch that
-            // hasn't produced a process yet.
-            let pgids: Vec<u32> = running.borrow().values().copied().filter(|&p| p != 0).collect();
-            spawn_async(
-                async move {
-                    tokio::task::spawn_blocking(move || launcher::stop_all(&pgids)).await
-                },
-                move |_| {
-                    running.borrow_mut().retain(|_, &mut pgid| pgid == 0);
-                    refresh_list();
-                    toast_overlay.add_toast(Toast::new("Stopped all trainers"));
-                },
-            );
-        });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  Fix Stale Instance
-    // ─────────────────────────────────────────────────────────────────────────
-    {
-        let window = window.clone();
-        let toast_overlay = toast_overlay.clone();
-        troubleshoot_btn.connect_clicked(move |_| {
-            show_troubleshoot(&window, &toast_overlay);
-        });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     //  About
     // ─────────────────────────────────────────────────────────────────────────
     {
@@ -507,32 +464,6 @@ pub fn build_ui(app: &Application) {
                 .build();
             dialog.add_acknowledgement_section(Some("Built with"), &["Claude Code (Anthropic)", "Codex (OpenAI)"]);
             dialog.present(Some(&window));
-        });
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  Save Debug Log — bundles the app log + privileged setup log (if
-    //  readable) into one file the user picks, for handing to whoever's
-    //  troubleshooting a failed launch.
-    // ─────────────────────────────────────────────────────────────────────────
-    {
-        let window = window.clone();
-        let toast_overlay = toast_overlay.clone();
-        save_log_btn.connect_clicked(move |_| {
-            let dialog = FileDialog::builder()
-                .title("Save Debug Log")
-                .initial_name(format!("steam-punk-log-{}.txt", applog::filename_timestamp()))
-                .build();
-
-            let toast_overlay = toast_overlay.clone();
-            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
-                let Ok(file) = result else { return };
-                let Some(path) = file.path() else { return };
-                match applog::export_to(&path) {
-                    Ok(()) => toast_overlay.add_toast(Toast::new("Debug log saved")),
-                    Err(e) => toast_overlay.add_toast(Toast::new(&format!("Save failed: {e}"))),
-                }
-            });
         });
     }
 
@@ -1149,7 +1080,7 @@ fn launch_trainer_now(
                 }
             }
             Ok(Err(e)) => {
-                launcher::record_failure(format!("Could not start the trainer through Proton: {e:#}"));
+                launcher::record_failure(&format!("Could not start the trainer through Proton: {e:#}"));
                 toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}")));
             }
             Err(e) => toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}"))),
@@ -1334,7 +1265,7 @@ fn run_automatic_setup(
                     anyhow::bail!(
                         "Couldn't get a working .NET runtime into this game's prefix. No other \
                          game's Proton prefix on this system had one to copy, and the installer \
-                         didn't complete. See the debug log (Save Debug Log) for the details."
+                         didn't complete. The details are in ~/.local/share/steam-punk/steam-punk.log."
                     );
                 }
 
@@ -1356,107 +1287,5 @@ fn run_automatic_setup(
             };
             launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard);
         },
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Stale-instance recovery dialog
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn show_troubleshoot(window: &ApplicationWindow, toast_overlay: &ToastOverlay) {
-    let window = window.clone();
-    let toast_overlay = toast_overlay.clone();
-
-    let picker_window = window.clone();
-    let picker_toasts = toast_overlay.clone();
-    with_launch_target(
-        &picker_window,
-        &picker_toasts,
-        Rc::new(move |target| {
-            let window = window.clone();
-            let toast_overlay = toast_overlay.clone();
-
-            let dirs = launcher::trainer_log_dirs(&target);
-            let failure = launcher::last_failure();
-            if dirs.is_empty() && failure.is_none() {
-                toast_overlay.add_toast(Toast::new("No trainer logs found for the running game"));
-                return;
-            }
-
-            let dialog = AdwDialog::builder()
-                .title("Clear Stale Trainer Instance")
-                .content_width(420)
-                .content_height(320)
-                .build();
-
-            let outer = GtkBox::new(Orientation::Vertical, 8);
-            outer.set_margin_top(12);
-            outer.set_margin_bottom(12);
-            outer.set_margin_start(12);
-            outer.set_margin_end(12);
-
-            if let Some(failure) = &failure {
-                let heading = Label::new(Some("Likely cause of the last failed launch"));
-                heading.add_css_class("heading");
-                heading.set_xalign(0.0);
-                outer.append(&heading);
-                let cause = Label::new(Some(failure));
-                cause.set_wrap(true);
-                cause.set_xalign(0.0);
-                cause.set_selectable(true);
-                outer.append(&cause);
-            }
-
-            let hint = Label::new(Some(if dirs.is_empty() {
-                "No trainer log folders were found for the running game."
-            } else {
-                "If a trainer refuses to start, claiming a previous instance is running, \
-                 clear its log folder below, then relaunch."
-            }));
-            hint.set_wrap(true);
-            hint.set_xalign(0.0);
-            outer.append(&hint);
-
-            let list = ListBox::new();
-            list.set_selection_mode(SelectionMode::None);
-            list.add_css_class("boxed-list");
-            outer.append(&list);
-
-            for dir in dirs {
-                let name = dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let row = ActionRow::builder().title(esc(&name)).build();
-
-                let clear_btn = Button::builder()
-                    .label("Clear")
-                    .valign(Align::Center)
-                    .build();
-                clear_btn.add_css_class("destructive-action");
-
-                let toast_overlay2 = toast_overlay.clone();
-                let dir2 = dir.clone();
-                clear_btn.connect_clicked(move |_| {
-                    let result = std::fs::remove_file(dir2.join("info.ini"));
-                    applog::log(&format!(
-                        "UI: cleared stale instance {} -> {result:?}",
-                        dir2.display()
-                    ));
-                    match result {
-                        Ok(()) => toast_overlay2.add_toast(Toast::new("Cleared")),
-                        Err(e) => {
-                            toast_overlay2.add_toast(Toast::new(&format!("Failed: {e}")))
-                        }
-                    }
-                });
-                row.add_suffix(&clear_btn);
-                list.append(&row);
-            }
-
-            let scroll = ScrolledWindow::builder().vexpand(true).child(&outer).build();
-            dialog.set_child(Some(&scroll));
-            dialog.present(Some(&window));
-        }),
     );
 }

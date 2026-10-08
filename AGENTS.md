@@ -44,8 +44,7 @@ which has been observed stale.
   packages need root, the winetricks install itself only touches the
   user-owned wine prefix and needs no privilege escalation.
 - `applog.rs` — single per-session log covering launches, setup steps, and
-  user actions, with an in-app export so a user can hand it to whoever's
-  troubleshooting without needing a terminal.
+  user actions, at `~/.local/share/steam-punk/steam-punk.log`.
 
 ## Known quirks
 
@@ -72,10 +71,12 @@ succeeded.
 **AppID cover-art caching design.** A trainer's optional AppID association
 (set at import time, fully opt-in — reverses the original "no per-game
 association" decision from 0.1.0) drives a name/cover-art lookup. The local
-Steam install is tried first (`appmanifest_<appid>.acf` name, and the portrait
-image in `appcache/librarycache/<appid>/` chosen by decoded dimensions, plus
-the old flat `<appid>_*` files, with header-style art as the fallback); the
-public Steam Store API/CDN fills in only what is missing. This happens exactly once per AppID and is
+Steam install is tried first (`appmanifest_<appid>.acf` name, and the header
+art in `appcache/librarycache/<appid>/` chosen by decoded dimensions, plus
+the old flat `<appid>_*` files); the public Steam Store API/CDN fills in only
+what is missing, again with header art. Covers are always header art
+(460x215), never the portrait capsule: the list gives every cover one
+landscape slot, and a mix of shapes made the rows uneven. This happens exactly once per AppID and is
 cached to disk under `data_dir()/cache/` (`<appid>.name.txt`,
 `<appid>.jpg`), keyed by AppID rather than by trainer since multiple
 trainers can share one game. `gamedata::fetch_and_cache` treats a failed

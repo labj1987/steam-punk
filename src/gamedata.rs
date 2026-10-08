@@ -288,7 +288,7 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// Dimensions of an image file, reading only its first 128 KB.
-pub fn image_size(path: &Path) -> Option<(u32, u32)> {
+fn image_size(path: &Path) -> Option<(u32, u32)> {
     use std::io::Read;
     let mut buf = Vec::new();
     std::fs::File::open(path)
@@ -297,16 +297,6 @@ pub fn image_size(path: &Path) -> Option<(u32, u32)> {
         .read_to_end(&mut buf)
         .ok()?;
     image_dimensions(&buf)
-}
-
-/// The portrait image closest to Steam's 600x900 library capsule, if any
-/// candidate is taller than it is wide.
-fn pick_portrait(candidates: &[(PathBuf, u32, u32)]) -> Option<PathBuf> {
-    candidates
-        .iter()
-        .filter(|(_, w, h)| h > w)
-        .min_by_key(|(_, w, h)| w.abs_diff(600) + h.abs_diff(900))
-        .map(|(p, _, _)| p.clone())
 }
 
 /// Header-style art: a modest landscape image (about 460x215 or 600x338).
@@ -345,8 +335,8 @@ fn collect_images(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 
 /// Cover art for `appid` from Steam's local library cache under `root`:
 /// the per-AppID folder (hashed file names, so identified by decoded
-/// dimensions) plus the older flat `<appid>_*` files. Prefers a portrait
-/// image, then header art.
+/// dimensions) plus the older flat `<appid>_*` files. Only header art is
+/// used, never the portrait capsule, so every cover has the same shape.
 fn local_cover(root: &Path, appid: u32) -> Option<PathBuf> {
     let cache = root.join("appcache/librarycache");
     let mut files: Vec<PathBuf> = Vec::new();
@@ -372,7 +362,7 @@ fn local_cover(root: &Path, appid: u32) -> Option<PathBuf> {
         .into_iter()
         .filter_map(|p| image_size(&p).map(|(w, h)| (p, w, h)))
         .collect();
-    pick_portrait(&candidates).or_else(|| pick_header(&candidates))
+    pick_header(&candidates)
 }
 
 /// Normalizes a title for comparison: lowercase alphanumeric words, with
@@ -473,24 +463,19 @@ async fn fetch_appdetails(client: &reqwest::Client, appid: u32) -> Result<AppDet
     Ok(AppDetails { name, header_image })
 }
 
-/// Tries the guessed horizontal library capsule art first (matching Steam's
-/// own library-list aesthetic, when it exists), then the guessed flat
-/// header path, then — the one guaranteed to work, since it's the exact
-/// URL Steam's own store page serves for this AppID — `header_image` from
-/// the appdetails response already fetched in `fetch_and_cache`.
+/// Header art (460x215), the shape every row's cover slot is sized for: the
+/// guessed flat header path first, then — the one guaranteed to work, since
+/// it's the exact URL Steam's own store page serves for this AppID —
+/// `header_image` from the appdetails response already fetched in
+/// `fetch_and_cache`.
 async fn fetch_cover(client: &reqwest::Client, appid: u32, header_image: Option<&str>) -> Result<()> {
-    let library_url =
-        format!("https://cdn.akamai.steamstatic.com/steam/apps/{appid}/library_600x338.jpg");
     let header_url = format!("https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg");
 
-    let bytes = match download_image(client, &library_url).await {
+    let bytes = match download_image(client, &header_url).await {
         Ok(b) => b,
-        Err(_) => match download_image(client, &header_url).await {
-            Ok(b) => b,
-            Err(e) => match header_image {
-                Some(url) => download_image(client, url).await?,
-                None => return Err(e),
-            },
+        Err(e) => match header_image {
+            Some(url) => download_image(client, url).await?,
+            None => return Err(e),
         },
     };
     std::fs::write(cover_cache_path(appid)?, bytes)
@@ -726,8 +711,7 @@ mod tests {
     }
 
     /// Live check against a real AppID (Monster Hunter Stories 3: Twisted
-    /// Reflection) confirmed to 404 on both guessed CDN paths
-    /// (library_600x338.jpg and the flat header.jpg) — verifies the
+    /// Reflection) confirmed to 404 on the flat header.jpg guess — verifies the
     /// appdetails header_image fallback actually rescues cover art for it.
     #[tokio::test]
     #[ignore]
@@ -822,17 +806,16 @@ mod tests {
     }
 
     #[test]
-    fn portrait_pick_prefers_600x900_and_ignores_landscape() {
+    fn header_pick_ignores_heroes_and_portraits() {
         let c = vec![
             (PathBuf::from("hero.jpg"), 1920, 620),
             (PathBuf::from("header.jpg"), 460, 215),
             (PathBuf::from("small.jpg"), 300, 450),
             (PathBuf::from("capsule.jpg"), 600, 900),
         ];
-        assert_eq!(super::pick_portrait(&c), Some(PathBuf::from("capsule.jpg")));
-        assert_eq!(super::pick_portrait(&c[..2]), None);
         assert_eq!(super::pick_header(&c), Some(PathBuf::from("header.jpg")));
         assert_eq!(super::pick_header(&c[..1]), None);
+        assert_eq!(super::pick_header(&c[2..]), None);
     }
 
     #[test]
@@ -841,15 +824,15 @@ mod tests {
         let dir = s.0.join("appcache/librarycache/3240220");
         std::fs::create_dir_all(dir.join("0a1b2c3d")).unwrap();
         std::fs::write(dir.join("0a1b2c3d/9f8e7d.jpg"), fake_jpeg(1920, 620)).unwrap();
+        std::fs::write(dir.join("0a1b2c3d/library_header.jpg"), fake_jpeg(460, 215)).unwrap();
         std::fs::write(dir.join("4e5f6a.jpg"), fake_jpeg(600, 900)).unwrap();
-        std::fs::write(dir.join("logo.png"), fake_png(640, 360)).unwrap();
         std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
-        assert_eq!(super::local_cover(&s.0, 3240220), Some(dir.join("4e5f6a.jpg")));
+        assert_eq!(super::local_cover(&s.0, 3240220), Some(dir.join("0a1b2c3d/library_header.jpg")));
     }
 
     #[test]
-    fn local_cover_accepts_old_flat_names_and_falls_back_to_header() {
+    fn local_cover_accepts_old_flat_names_and_never_takes_a_portrait() {
         let s = Scratch::new("flat");
         let cache = s.0.join("appcache/librarycache");
         std::fs::create_dir_all(&cache).unwrap();
@@ -858,8 +841,9 @@ mod tests {
         std::fs::write(cache.join("43_header.jpg"), fake_jpeg(460, 215)).unwrap();
         std::fs::write(cache.join("420_library_600x900.jpg"), fake_jpeg(600, 900)).unwrap();
 
-        assert_eq!(super::local_cover(&s.0, 42), Some(cache.join("42_library_600x900.jpg")));
+        assert_eq!(super::local_cover(&s.0, 42), Some(cache.join("42_header.jpg")));
         assert_eq!(super::local_cover(&s.0, 43), Some(cache.join("43_header.jpg")));
+        assert_eq!(super::local_cover(&s.0, 420), None);
         assert_eq!(super::local_cover(&s.0, 44), None);
     }
 
@@ -873,7 +857,7 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(s.0.join("appcache/librarycache/7")).unwrap();
-        std::fs::write(s.0.join("appcache/librarycache/7/x.jpg"), fake_jpeg(600, 900)).unwrap();
+        std::fs::write(s.0.join("appcache/librarycache/7/x.jpg"), fake_jpeg(460, 215)).unwrap();
 
         let info = super::local_game_info_in(std::slice::from_ref(&s.0), 7);
         assert_eq!(info.name.as_deref(), Some("Seven"));

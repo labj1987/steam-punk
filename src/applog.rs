@@ -1,11 +1,10 @@
 //! applog.rs — a single, per-session log covering everything the app does
 //! (resolved launch targets, spawned commands, setup steps, user actions),
-//! plus an in-app way to export it so a user can hand it to whoever's
-//! troubleshooting without needing a terminal.
+//! at `~/.local/share/steam-punk/steam-punk.log`.
 //!
 //! The trainer subprocess's own stdout/stderr is also redirected into this
-//! same file (see launcher::launch_trainer), so one export captures the
-//! whole picture for a failed launch.
+//! same file (see launcher::launch_trainer), so the one file has the whole
+//! picture for a failed launch.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -21,8 +20,7 @@ pub fn log_path() -> PathBuf {
 }
 
 /// Starts a fresh log for this run — truncated rather than appended forever,
-/// so an exported log stays focused on the session that actually hit the
-/// problem being reported.
+/// so the log stays focused on the session that actually hit a problem.
 pub fn init() {
     let path = log_path();
     if let Some(parent) = path.parent() {
@@ -41,37 +39,6 @@ pub fn log(msg: &str) {
         return;
     };
     let _ = writeln!(f, "[{}] {msg}", timestamp());
-}
-
-/// Bundles the app log with the privileged setup log (root-owned, written by
-/// pkexec's privileged-setup.sh) into one file at `dest`, best-effort on the
-/// latter since a normal user may not have read access to it.
-pub fn export_to(dest: &std::path::Path) -> anyhow::Result<()> {
-    let mut out = String::new();
-    out.push_str("==== Steam Punk app log ====\n");
-    match std::fs::read_to_string(log_path()) {
-        Ok(s) => out.push_str(&s),
-        Err(e) => out.push_str(&format!("(could not read: {e})\n")),
-    }
-
-    out.push_str(&format!(
-        "\n==== privileged setup log ({}) ====\n",
-        crate::setup::LOGFILE
-    ));
-    match std::fs::read_to_string(crate::setup::LOGFILE) {
-        Ok(s) => out.push_str(&s),
-        Err(e) => out.push_str(&format!("(not available: {e})\n")),
-    }
-
-    std::fs::write(dest, out)?;
-    Ok(())
-}
-
-/// A filesystem-safe timestamp for default export filenames, e.g.
-/// `20260804-231502`.
-pub fn filename_timestamp() -> String {
-    let (y, mo, d, h, mi, s) = civil_from_unix(unix_now());
-    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
 fn unix_now() -> i64 {

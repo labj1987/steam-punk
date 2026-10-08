@@ -4,6 +4,14 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.6.0 — 2026-10-08
+
+- Every game's cover art is now the same size. Some games showed tall portrait art and
+  others wide header art, so the rows didn't line up; all covers now use the wide header.
+- The Stop All, Fix Stale Instance and Save Debug Log buttons are gone. Each running trainer
+  still has its own Stop button, and the log is still written to
+  `~/.local/share/steam-punk/steam-punk.log`.
+
 ## 0.5.1 — 2026-10-02
 
 - The About dialog and README credit Codex (OpenAI) again, alongside Claude Code (Anthropic).

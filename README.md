@@ -8,7 +8,7 @@ game's wine session, on Linux. (Formerly known as proton-trainer, then SteamPunk
 
 Trainer list, showing cover art resolved from an associated Steam AppID, and a Stop button on any currently-running trainer:
 
-![Trainer list showing imported games, cover art, and Launch/Stop controls](screenshots/main.png)
+![Trainer list showing imported games, cover art, and Launch buttons](screenshots/main.png)
 
 ## How it works
 
@@ -45,8 +45,8 @@ Flatpak Steam) when available, and from the public Steam Store otherwise. On
 import, the app suggests the installed game that matches the trainer's file
 name. Online games with an anti-cheat get a one-time warning (single-player-only
 games never do): use trainers in single-player only. If a trainer dies right after launch, the likely cause
-(game closed, different Proton build, missing .NET) is shown under Fix Stale
-Instance.
+(game closed, different Proton build, missing .NET) is shown in a notification,
+and the full log is at `~/.local/share/steam-punk/steam-punk.log`.
 
 If the game's prefix doesn't have a real .NET Framework 4.6.2 or newer yet
 (required by current WPF-based trainers, and never provided by Proton's

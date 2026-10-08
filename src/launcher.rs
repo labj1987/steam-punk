@@ -564,9 +564,6 @@ struct LaunchRecord {
 static LAUNCHES: LazyLock<Mutex<HashMap<u32, LaunchRecord>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The most recent launch problem, shown in the troubleshoot dialog.
-static LAST_FAILURE: Mutex<Option<String>> = Mutex::new(None);
-
 /// A trainer whose whole process group is gone this soon after launch is
 /// treated as a failed launch (a healthy trainer stays up until closed).
 const EARLY_EXIT_SECS: u64 = 20;
@@ -575,15 +572,8 @@ const EARLY_EXIT_SECS: u64 = 20;
 /// scanned for known failure signatures.
 const OUTPUT_TAIL_BYTES: u64 = 16 * 1024;
 
-pub fn record_failure(text: String) {
+pub fn record_failure(text: &str) {
     crate::applog::log(&format!("launch failure: {}", text.replace('\n', " | ")));
-    if let Ok(mut last) = LAST_FAILURE.lock() {
-        *last = Some(text);
-    }
-}
-
-pub fn last_failure() -> Option<String> {
-    LAST_FAILURE.lock().ok().and_then(|l| l.clone())
 }
 
 /// Facts gathered after an early exit, kept separate from the gathering so
@@ -621,7 +611,7 @@ fn likely_causes(i: &DiagInputs) -> Vec<String> {
         causes.push(format!("{problem}. Launch again to run the one-time setup."));
     } else if i.output.contains("err:module:import_dll") {
         causes.push(
-            "Wine could not load a library the trainer needs; the debug log has the details."
+            "Wine could not load a library the trainer needs; ~/.local/share/steam-punk/steam-punk.log has the details."
                 .to_string(),
         );
     }
@@ -672,7 +662,7 @@ pub fn check_early_exit(pgid: u32) -> Option<String> {
         return None;
     }
     let text = causes.join("\n");
-    record_failure(text.clone());
+    record_failure(&text);
     Some(text)
 }
 
@@ -1393,34 +1383,3 @@ mod tests {
     }
 }
 
-/// Stop every tracked trainer by signalling exactly the process groups we
-/// launched, instead of `pkill -f` pattern matching against every process's
-/// command line (which can hit unrelated processes). Blocks up to ~2s per
-/// group — call via `spawn_blocking`.
-pub fn stop_all(pgids: &[u32]) {
-    for &pgid in pgids.iter().filter(|&&p| p > 1) {
-        stop_trainer(pgid);
-    }
-    crate::applog::log(&format!("stop_all: stopped pgids {pgids:?}"));
-}
-
-/// Per-game trainer-logs directories FLiNG trainers leave behind. Each may
-/// contain a stale info.ini lock file that makes a trainer refuse to start
-/// because it thinks a previous instance is still running; deleting it is
-/// the documented fix. There's no reliable way to map the running game to
-/// exactly one of these (the folder name is the trainer's internal title,
-/// not necessarily Steam's), so recovery lists all of them and lets the
-/// user pick.
-pub fn trainer_log_dirs(target: &LaunchTarget) -> Vec<PathBuf> {
-    let base = target
-        .prefix_dir()
-        .join("drive_c/users/steamuser/AppData/Local/FLiNGTrainer/trainer-logs");
-    let Ok(entries) = std::fs::read_dir(&base) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect()
-}
