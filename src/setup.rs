@@ -1,8 +1,8 @@
 //! setup.rs — one-time wine .NET prerequisite setup.
 //!
 //! Split into two phases matching the actual privilege boundary: system
-//! packages need root (via pkexec + a privileged script, same pattern as
-//! KernelPop's install.rs), while the winetricks install itself only touches the
+//! packages need root (via pkexec + a privileged script), while the winetricks
+//! install itself only touches the
 //! user-owned wine prefix and needs no privilege escalation.
 
 use anyhow::{bail, Context, Result};
@@ -43,8 +43,8 @@ pub fn system_prereqs_present() -> bool {
     present
 }
 
-/// Runs the privileged one-time setup via pkexec. Same pattern as KernelPop's
-/// install.rs — bails with a clear message if pkexec/polkit isn't available
+/// Runs the privileged one-time setup via pkexec — bails with a clear
+/// message if pkexec/polkit isn't available
 /// or the user cancels the auth prompt.
 pub fn run_system_setup() -> Result<()> {
     crate::applog::log("run_system_setup: launching pkexec privileged-setup.sh");

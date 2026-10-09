@@ -30,7 +30,7 @@ which has been observed stale.
   +), AppID search/association, launch/troubleshoot dialogs.
 - `launcher.rs` — resolves the running Proton build and compat paths,
   spawns the trainer, and the whole .NET-usability check/repair path (see
-  gotcha below). Largest file in the app.
+  Known quirks below). Largest file in the app.
 - `library.rs` — trainer list persistence (`trainers.json`), per-trainer
   AppID metadata.
 - `gamedata.rs` — resolves a game's name and cover art from a Steam AppID,
@@ -90,15 +90,16 @@ just means the caller falls back to the trainer's filename-derived title.
 `build-appimage.sh` builds the AppImage, `appimagetool`-direct
 (no `linuxdeploy`):
 1. Installs build deps via apt (cargo, rustc, gtk4/adwaita dev headers,
-   `wget`, `zsync`, `desktop-file-utils`). The `zsync` install is
+   `wget`, `zsync`, `file`, `desktop-file-utils`). The install of those four tools is
    deliberately unconditional (not behind the `command -v cargo` guard) —
    in CI a prior step already installs cargo, so that guard evaluates
    false and anything gated behind it gets silently skipped.
-2. `cargo build --release`.
+2. `cargo build --release --locked`.
 3. Assembles the AppDir (binary, privileged script, polkit policy, appdata,
-   desktop file, icon, generated `AppRun`).
-4. Downloads `appimagetool` (cached in `.cache/`, optionally pinned via
-   `APPIMAGETOOL_URL`/`APPIMAGETOOL_SHA256`) and packs the AppDir into
+   desktop file, icon, generated `AppRun`) and runs `desktop-file-validate`
+   on the copied desktop file (fatal).
+4. Downloads `appimagetool` (pinned to 1.9.1 and verified against a SHA-256
+   checksum in the script, cached in `.cache/`) and packs the AppDir into
    `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
    `gh-releases-zsync` delta updates (`steam-punk-*` pattern).
 5. Runs `zsyncmake` directly on the built AppImage to produce the `.zsync`
@@ -110,13 +111,15 @@ just means the caller falls back to the trainer's filename-derived title.
 1. Bump `version` in `Cargo.toml`.
 2. Add a `CHANGELOG.md` entry (see Changelog below).
 3. Run `python3 scripts/sync_appdata_releases.py` to regenerate the
-   appdata `<releases>` list; the release workflow fails if it is out of
+   appdata `<releases>` list; CI (`.github/workflows/ci.yml`, on every push
+   to `main` and every pull request: build, test, clippy, shellcheck and the
+   changelog checks) and the release workflow fail if it is out of
    date.
 4. Commit, push to `main`.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The tag push triggers `.github/workflows/release.yml` ("Build and
    Release"), which checks the tag matches `Cargo.toml` and the changelog,
-   runs `cargo test`, then `build-appimage.sh`, and uploads the AppImage
+   runs `cargo test --locked`, then `build-appimage.sh`, and uploads the AppImage
    (+ `.zsync`) to a GitHub Release via `softprops/action-gh-release`,
    with that version's changelog section as the release text.
 
