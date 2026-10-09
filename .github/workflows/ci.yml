@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install GTK4 / libadwaita headers
+        run: |
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev pkg-config
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: ShellCheck
+        run: shellcheck -S warning build-appimage.sh scripts/*.sh
+      - name: AppStream releases match the changelog
+        run: python3 scripts/sync_appdata_releases.py --check && python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)" > /dev/null
