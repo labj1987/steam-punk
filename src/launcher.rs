@@ -296,7 +296,7 @@ impl DotnetStatus {
         if !self.crt_present {
             missing.push("CLR support libraries");
         }
-        if !self.release.is_some_and(|r| r >= DOTNET_462_RELEASE) {
+        if self.release.is_none_or(|r| r < DOTNET_462_RELEASE) {
             missing.push("a .NET 4.6.2+ registry entry");
         }
         format!(".NET runtime not usable (missing {})", missing.join(", "))
