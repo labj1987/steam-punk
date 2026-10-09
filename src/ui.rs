@@ -149,6 +149,8 @@ pub fn build_ui(app: &Application) {
 
     // Forward-declaration slot so the Remove button (defined inside the
     // closure being built) can call refresh_list once it exists.
+    // A one-off slot type; a named alias would not make it clearer.
+    #[allow(clippy::type_complexity)]
     let self_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     let refresh_list: Rc<dyn Fn()> = {
@@ -456,13 +458,15 @@ pub fn build_ui(app: &Application) {
                 .application_name("Steam Punk")
                 .version(env!("CARGO_PKG_VERSION"))
                 .license_type(gtk4::License::Agpl30)
+                .website("https://github.com/labj1987/steam-punk")
+                .issue_url("https://github.com/labj1987/steam-punk/issues")
                 .developers(vec!["Linnard Alex Brown Jr."])
                 .comments(
                     "Launches Windows game trainers through Proton against a running \
                      Steam game's wine session.",
                 )
                 .build();
-            dialog.add_acknowledgement_section(Some("Built with"), &["Claude Code (Anthropic)", "Codex (OpenAI)"]);
+            dialog.add_credit_section(Some("Built with"), &["Claude Code (Anthropic)", "Codex (OpenAI)"]);
             dialog.present(Some(&window));
         });
     }
