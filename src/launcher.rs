@@ -67,7 +67,7 @@ pub fn find_running_appids() -> Vec<u32> {
 /// lines (this app's own tooling included), and `SteamLaunch` is what makes it
 /// a game rather than a mention.
 fn appid_from_cmdline(args: &[&str]) -> Option<u32> {
-    if !args.iter().any(|a| *a == "SteamLaunch") {
+    if !args.contains(&"SteamLaunch") {
         return None;
     }
     args.iter()
@@ -895,9 +895,9 @@ fn dotnet_reg_export(system_reg: &str) -> String {
     let mut continuing = false;
 
     for line in system_reg.lines() {
-        if line.starts_with('[') {
+        if let Some(rest) = line.strip_prefix('[') {
             continuing = false;
-            let key = line[1..].split(']').next().unwrap_or_default();
+            let key = rest.split(']').next().unwrap_or_default();
             keep = WANTED
                 .iter()
                 .any(|w| key == *w || key.starts_with(&format!("{w}\\\\")));
@@ -914,11 +914,7 @@ fn dotnet_reg_export(system_reg: &str) -> String {
         // Values can wrap across lines with a trailing backslash (long hex
         // blobs do this routinely), so a continuation is copied verbatim
         // rather than re-tested for a leading quote.
-        if continuing {
-            out.push_str(line);
-            out.push('\n');
-            continuing = line.ends_with('\\');
-        } else if line.starts_with('"') || line.starts_with('@') {
+        if continuing || line.starts_with('"') || line.starts_with('@') {
             out.push_str(line);
             out.push('\n');
             continuing = line.ends_with('\\');

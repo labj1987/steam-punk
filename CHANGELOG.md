@@ -198,8 +198,7 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
   replacing the single `steampunk.png`.
 - Added `CLAUDE.md` covering build/release process and architecture.
 - AppStream metadata: added `developer`, `url`, and `content_rating` tags.
-- Dependency bump: gtk4 0.11, libadwaita 0.9, glib/gio 0.22, gdk4 0.11,
-  matching GreenLight/KernelPop's target versions.
+- Dependency bump: gtk4 0.11, libadwaita 0.9, glib/gio 0.22, gdk4 0.11.
 
 ## 0.3.0 — 2026-08-05
 
@@ -362,8 +361,7 @@ logs are migrated automatically from `~/.local/share/proton-trainer` to
   the launch sequence with the eventual mapped window, so it leaves an
   orphaned placeholder entry in the dock (generic icon, tooltip showing
   only the raw `io.github.labj1987.ProtonTrainer` app ID) alongside the
-  real, correctly-iconed window. NVI already had `StartupNotify=true` and
-  never exhibited this. Added the line to match.
+  real, correctly-iconed window. Added the line.
 
 ## 0.1.4 — 2026-08-04
 

@@ -19,21 +19,21 @@ echo "==> Building $APP $VERSION AppImage"
 # failing on a package we actually need should be fatal.
 apt-get update -qq || true
 
-# zsync is installed unconditionally (after the index refresh above): on CI a
-# prior workflow step already installs cargo, so a `command -v cargo` guard
-# around this evaluates false and anything gated behind it — zsync included —
-# gets silently skipped.
-apt-get install -y -qq zsync
+# The tools this script itself uses are installed unconditionally (after the
+# index refresh above): on CI a prior workflow step already installs cargo, so
+# a `command -v cargo` guard around this evaluates false and anything gated
+# behind it gets silently skipped.
+apt-get install -y -qq zsync wget file desktop-file-utils
 
 if ! command -v cargo >/dev/null 2>&1 || ! pkg-config --exists gtk4 2>/dev/null; then
     echo "==> Installing build dependencies"
     apt-get install -y -qq cargo rustc libgtk-4-dev libadwaita-1-dev \
-        pkg-config libssl-dev wget file desktop-file-utils zsync
+        pkg-config
 fi
 
 # ── Release build ─────────────────────────────────────────────────────
-echo "==> cargo build --release"
-cargo build --release
+echo "==> cargo build --release --locked"
+cargo build --release --locked
 
 # ── AppDir layout ─────────────────────────────────────────────────────
 rm -rf "$BUILD_DIR"
@@ -59,11 +59,13 @@ cp data/io.github.labj1987.SteamPunk.appdata.xml   "$APPDIR/usr/share/metainfo/"
 cp data/$APP.desktop "$APPDIR/"
 cp data/$APP-256.png "$APPDIR/$APP.png"
 
+desktop-file-validate "$APPDIR/$APP.desktop"
+
 # ── AppRun ────────────────────────────────────────────────────────────
 # On first launch (or after an update) the privileged script and polkit
 # policy must exist at fixed system paths — polkit refuses relative/user
 # paths — so AppRun installs them via pkexec when missing or outdated, then
-# execs the app. Same pattern as KernelPop's AppRun.
+# execs the app.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -124,33 +126,24 @@ APPRUN
 chmod 755 "$APPDIR/AppRun"
 
 # ── appimagetool ──────────────────────────────────────────────────────
-# Cached outside $BUILD_DIR (which is wiped above) so the cache check is live.
-# Set APPIMAGETOOL_URL to a fixed release asset and APPIMAGETOOL_SHA256 to its
-# checksum to pin it; the download is verified when a checksum is given, and
-# the computed hash is always printed so it can be pinned.
-TOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage}"
-TOOL_SHA256="${APPIMAGETOOL_SHA256:-}"
-TOOL_CACHE=".cache"
-TOOL="$TOOL_CACHE/appimagetool"
-mkdir -p "$TOOL_CACHE"
-if [[ -f "$TOOL" && -n "$TOOL_SHA256" ]] && \
-   [[ "$(sha256sum "$TOOL" | cut -d' ' -f1)" != "$TOOL_SHA256" ]]; then
-    echo "==> Cached appimagetool does not match the pinned checksum, re-downloading"
-    rm -f "$TOOL"
-fi
+# Pinned and checksum-verified. Cached outside $BUILD_DIR (which is wiped above)
+# so a second run reuses it.
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+TOOL_DIR=".cache"
+TOOL="$TOOL_DIR/appimagetool-$APPIMAGETOOL_VERSION"
 if [[ ! -f "$TOOL" ]]; then
-    echo "==> Downloading appimagetool"
-    wget -q -O "$TOOL.part" "$TOOL_URL"
-    ACTUAL="$(sha256sum "$TOOL.part" | cut -d' ' -f1)"
-    echo "==> appimagetool sha256: $ACTUAL"
-    if [[ -n "$TOOL_SHA256" && "$ACTUAL" != "$TOOL_SHA256" ]]; then
-        rm -f "$TOOL.part"
-        echo "ERROR: appimagetool checksum mismatch (expected $TOOL_SHA256)" >&2
-        exit 1
-    fi
+    mkdir -p "$TOOL_DIR"
+    wget -q -O "$TOOL.part" \
+        "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-x86_64.AppImage"
     mv "$TOOL.part" "$TOOL"
-    chmod +x "$TOOL"
 fi
+if ! echo "$APPIMAGETOOL_SHA256  $TOOL" | sha256sum -c --status -; then
+    echo "==> ERROR: appimagetool checksum mismatch" >&2
+    rm -f "$TOOL"
+    exit 1
+fi
+chmod +x "$TOOL"
 
 echo "==> Packing AppImage"
 OUT="$APP-$VERSION-$ARCH.AppImage"
@@ -163,8 +156,8 @@ echo "==> Done: $OUT"
 ls -lh "$OUT"
 
 # appimagetool's built-in zsync generation silently no-ops on GitHub Actions
-# runners even when zsyncmake is installed and working (see KernelPop's CLAUDE.md
-# for the diagnosis) — build the .zsync sidecar directly instead. Non-fatal:
+# runners even when zsyncmake is installed and working — build the .zsync
+# sidecar directly instead. Non-fatal:
 # the AppImage itself is already valid without it.
 echo "==> Generating .zsync sidecar"
 if zsyncmake "$OUT"; then

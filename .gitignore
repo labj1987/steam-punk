@@ -1,5 +1,8 @@
-/target
-/build-appimage
+# Rust build output
+/target/
+
+# Packaging artifacts
+/build-appimage/
+/.cache/
 *.AppImage
 *.AppImage.zsync
-.cache

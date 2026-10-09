@@ -3,7 +3,7 @@
   <id>io.github.labj1987.SteamPunk</id>
   <name>Steam Punk</name>
   <summary>Launch Windows game trainers through Proton against a running Steam game</summary>
-  <metadata_license>MIT</metadata_license>
+  <metadata_license>CC0-1.0</metadata_license>
   <project_license>AGPL-3.0-or-later</project_license>
   <description>
     <p>

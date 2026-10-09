@@ -15,33 +15,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set up Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Check tag matches Cargo.toml version
         run: |
-          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION" >&2
+          cargo_ver="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [[ "${GITHUB_REF_NAME}" != "v${cargo_ver}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_ver}" >&2
             exit 1
           fi
+          python3 scripts/sync_appdata_releases.py --check
 
-      # Steam Punk has no CI workflow, so the changelog checks run here, before anything is built.
-      - name: AppStream releases match the changelog
-        run: python3 scripts/sync_appdata_releases.py --check && python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "${GITHUB_REF_NAME}" > /dev/null
+      - name: Release notes self-test and dry run
+        run: python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "${GITHUB_REF_NAME}" > /dev/null
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq || true
-          sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev pkg-config libssl-dev
+          sudo apt-get install -y -qq libgtk-4-dev libadwaita-1-dev pkg-config
 
       - name: Run tests
-        run: cargo test
-
-      - name: Clippy
-        run: cargo clippy
-        continue-on-error: true
+        run: cargo test --locked
 
       - name: Build AppImage
         run: sudo -E env "PATH=$PATH" bash build-appimage.sh

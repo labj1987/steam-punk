@@ -2,7 +2,7 @@
 
 GTK4 + libadwaita desktop app for launching Windows game-trainer executables
 (e.g. FLiNG trainers) through Proton against a currently running Steam
-game's wine session, on Linux. (Formerly known as proton-trainer, then SteamPunk.)
+game's wine session, on Linux.
 
 ## Screenshot
 
@@ -88,3 +88,5 @@ AGPL-3.0-or-later. See [LICENSE](LICENSE).
 Code at or before commit `0d97e95b89080c5b53efca8880abfd8834d3009a` remains available
 under the MIT License per its original release. From this commit forward,
 AGPL-3.0-or-later.
+
+Linnard Alex Brown Jr.
