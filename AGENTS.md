@@ -88,23 +88,28 @@ just means the caller falls back to the trainer's filename-derived title.
 ## Build process
 
 `build-appimage.sh` builds the AppImage, `appimagetool`-direct
-(no `linuxdeploy`):
-1. Installs build deps via apt (cargo, rustc, gtk4/adwaita dev headers,
-   `wget`, `zsync`, `file`, `desktop-file-utils`). The install of those four tools is
-   deliberately unconditional (not behind the `command -v cargo` guard) —
-   in CI a prior step already installs cargo, so that guard evaluates
-   false and anything gated behind it gets silently skipped.
-2. `cargo build --release --locked`.
+(no `linuxdeploy`). It runs as an ordinary user and writes only inside the
+checkout:
+1. Only on a machine with no toolchain (no cargo or no GTK4 headers) does it
+   install build deps via apt (cargo, rustc, gtk4/adwaita dev headers,
+   `wget`, `zsync`, `file`, `desktop-file-utils`); that is the one part
+   needing root. In CI the workflow installs the packaging tools, and the
+   script stops early if `wget`, `file` or `desktop-file-validate` is missing.
+2. `cargo build --release --locked`. Rust is pinned in `rust-toolchain.toml`;
+   bump it there and in both workflows together (each checks it).
 3. Assembles the AppDir (binary, privileged script, polkit policy, appdata,
    desktop file, icon, generated `AppRun`) and runs `desktop-file-validate`
    on the copied desktop file (fatal).
 4. Downloads `appimagetool` (pinned to 1.9.1 and verified against a SHA-256
    checksum in the script, cached in `.cache/`) and packs the AppDir into
    `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
-   `gh-releases-zsync` delta updates (`steam-punk-*` pattern).
+   `gh-releases-zsync` delta updates (`steam-punk-*` pattern). The AppImage
+   type2 runtime is pinned and checksum-verified the same way and passed with
+   `--runtime-file` (otherwise `appimagetool` downloads a moving build).
 5. Runs `zsyncmake` directly on the built AppImage to produce the `.zsync`
    sidecar (`appimagetool`'s own zsync generation silently no-ops on GitHub Actions
-   runners). Keep that call non-fatal — the AppImage is valid without it.
+   runners). A missing or failing `zsyncmake` is fatal when `CI` is set (a
+   release without the sidecar cannot update); a local build only warns.
 
 ## Release process
 
@@ -118,10 +123,15 @@ just means the caller falls back to the trainer's filename-derived title.
 4. Commit, push to `main`.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The tag push triggers `.github/workflows/release.yml` ("Build and
-   Release"), which checks the tag matches `Cargo.toml` and the changelog,
-   runs `cargo test --locked`, then `build-appimage.sh`, and uploads the AppImage
-   (+ `.zsync`) to a GitHub Release via `softprops/action-gh-release`,
-   with that version's changelog section as the release text.
+   Release"). Its `build` job has a read-only token: it checks the tag matches
+   `Cargo.toml` and the changelog, runs `cargo test --locked`, then
+   `build-appimage.sh`. A separate `publish` job, the only one with write
+   access, attaches the AppImage (+ `.zsync`) to a GitHub Release via
+   `softprops/action-gh-release`, with that version's changelog section as
+   the release text.
+
+Actions in both workflows are pinned to full commit SHAs; Dependabot
+(`.github/dependabot.yml`) proposes the updates.
 
 ## Changelog
 
