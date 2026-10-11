@@ -4,6 +4,39 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.7.0 — 2026-10-11
+
+- The one-time .NET setup no longer breaks when it has to fall back to Microsoft's installer.
+  The installer now runs with the game's own Proton instead of your system's Wine, which
+  clashed with the running game and could damage its prefix. It can't run while the game is
+  open, so Steam Punk asks you to quit the game, waits for it to close, and tells you when to
+  start it again.
+- Setup no longer installs your system's 32-bit Wine packages: it only needs winetricks and
+  cabextract.
+- Setup now finds a working .NET runtime to copy in any of your Steam libraries, not only the
+  one the game is installed in.
+- Setup no longer reports "Couldn't get a working .NET runtime" right after successfully
+  copying one in.
+- Setup no longer stops when refreshing the package lists fails (for example because of one
+  broken third-party repository): it installs from the lists it already has, and says so if
+  the install then fails.
+- Steam Punk no longer asks for your password when it starts. It only asks when you choose the
+  automatic setup and system packages are missing, once.
+- The manual setup commands now match exactly what the automatic setup runs.
+- Opening Steam Punk again while it is already running no longer clears the running copy's log,
+  so the diagnosis of a trainer that failed to start keeps working.
+- Closing the Steam AppID dialog with Escape now counts as Skip, so the rest of a multi-file
+  import still gets its prompts and the list refreshes.
+- Your trainers' AppID links are no longer lost if Steam Punk is interrupted while saving them.
+  If the file holding them is damaged, Steam Punk tells you and leaves it alone instead of
+  overwriting it.
+- A cover image that was only partly saved is downloaded again instead of staying broken. Cover
+  art and search thumbnails are only downloaded from Steam's own servers.
+- Picking a file that isn't a trainer .exe in the import dialog now says so, instead of
+  importing something that never shows up.
+- Stop can no longer signal an unrelated program that happened to reuse a stopped trainer's
+  process ID.
+
 ## 0.6.0 — 2026-10-08
 
 - Every game's cover art is now the same size. Some games showed tall portrait art and

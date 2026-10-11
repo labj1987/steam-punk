@@ -22,6 +22,16 @@ instead of starting its own. The Proton build to use is detected from the
 actual running `wineserver` process, not from `compatdata`'s `config_info`,
 which has been observed stale.
 
+A launched trainer is tracked by its process group id, and the group's
+leader is deliberately left unreaped (its exit is observed with `WNOWAIT`)
+until the UI sees the group gone or Stop finishes: while the leader is a
+zombie its pid, and so the pgid number, can't be reused, so Stop can never
+signal an unrelated group. Stop only signals pgids that are still tracked.
+
+`trainers.json` (the AppID associations) is never overwritten when it can't
+be parsed: the list still shows the trainers by filename, the user gets the
+error, and saving an AppID fails instead of wiping the file.
+
 ## Module layout (`src/`)
 
 - `main.rs` — entry point, sets up the shared Tokio runtime, wires up the
@@ -39,12 +49,17 @@ which has been observed stale.
   installed-game matcher.
 - `steam.rs` — locates the local Steam client installs (native and Flatpak),
   library folders, and parses appmanifests (name, installdir, installed games).
-- `setup.rs` — the privileged one-time system-package setup (wine32:i386,
-  winetricks) via `pkexec`: system
+- `setup.rs` — the privileged one-time system-package setup (winetricks,
+  cabextract) via `pkexec`, and the winetricks `dotnet48` fallback: system
   packages need root, the winetricks install itself only touches the
   user-owned wine prefix and needs no privilege escalation.
 - `applog.rs` — single per-session log covering launches, setup steps, and
-  user actions, at `~/.local/share/steam-punk/steam-punk.log`.
+  user actions, at `~/.local/share/steam-punk/steam-punk.log`. Only the
+  primary instance starts (truncates) it, from GApplication `startup`: a
+  second launch forwards to the running instance and must not wipe its log,
+  whose byte offsets the launch diagnosis reads trainer output back from.
+- `fsutil.rs` — `write_atomic` (temp file, fsync, rename, directory fsync),
+  used for every app data file: `trainers.json` and the cover/name cache.
 
 ## Known quirks
 
@@ -59,14 +74,32 @@ everything that actually has to hold for the CLR to load: `clr.dll`
 present, a real (non-builtin) `mscoree.dll`, the CRT libraries `clr.dll`
 imports from system32 (`*_clr0400.dll` — missing these is silent, the CLR
 simply never loads), and a registry `Release` of 4.6.2 or newer
-(`DOTNET_462_RELEASE`). The one-time repair (`setup.rs`) prefers cloning a
-working runtime from another game's Proton prefix on the same system over
-the Microsoft installer — on Wine's new wow64 mode the installer fails
-outright and its rollback strips .NET back out of the prefix, so trying it
-first can leave a game worse off than before. `winetricks -f dotnet48` is
-used with `-f` (force) because winetricks marks a verb done in
-`winetricks.log` on first attempt regardless of whether it actually
-succeeded.
+(`DOTNET_462_RELEASE`). While the game's wineserver runs, a `Release` that
+falls short on disk is re-read from the live registry (`proton runinprefix
+reg query`): the server keeps the registry in memory and only writes
+`system.reg` out periodically and on exit, so keys the repair's regedit
+import just added aren't on disk yet. "A wineserver serves this prefix" is
+`launcher::prefix_in_use`: a wineserver whose working directory is wine's
+`/tmp/.wine-<uid>/server-<dev>-<ino>` for the prefix.
+
+The one-time repair prefers cloning a working runtime from another game's
+Proton prefix on the same system (every library's `compatdata`, every Steam
+install) over the Microsoft installer — on Wine's new wow64 mode the
+installer fails outright and its rollback strips .NET back out of the
+prefix, so trying it first can leave a game worse off than before. Cloning
+works with the game running. The installer fallback
+(`setup::install_dotnet48`) does not: winetricks runs `wineserver -w`
+between steps, which waits for every process in the prefix, so the user is
+asked to quit the game first and the app waits for its wineserver to go.
+winetricks is run with the game's own Proton wine (`launcher::ProtonWine`:
+`WINE`, `WINELOADER`, `WINESERVER`, `WINEDLLPATH`, `LD_LIBRARY_PATH`, `PATH`
+as Proton's own `init_wine` sets them), never the system wine, which is a
+different wine build than the one that made the prefix. The system packages
+are therefore only winetricks and cabextract (no `wine32:i386`). `winetricks
+-f dotnet48` is used with `-f` (force) because winetricks marks a verb done
+in `winetricks.log` on first attempt regardless of whether it actually
+succeeded. The dialog's manual commands are generated from the same
+environment and arguments, so they match what the automatic path runs.
 
 **AppID cover-art caching design.** A trainer's optional AppID association
 (set at import time, fully opt-in — reverses the original "no per-game
@@ -79,7 +112,12 @@ what is missing, again with header art. Covers are always header art
 landscape slot, and a mix of shapes made the rows uneven. This happens exactly once per AppID and is
 cached to disk under `data_dir()/cache/` (`<appid>.name.txt`,
 `<appid>.jpg`), keyed by AppID rather than by trainer since multiple
-trainers can share one game. `gamedata::fetch_and_cache` treats a failed
+trainers can share one game. Cache files are written atomically, and a
+cached cover only counts if it is a whole image (JPEG/PNG end marker
+present), so a torn file is a cache miss rather than a broken cover forever.
+Image URLs from the Store API are only fetched from Steam's https image CDN
+(`*.steamstatic.com`, `steamcdn-a.akamaihd.net`), and the shared HTTP client
+follows redirects only between Steam hosts. `gamedata::fetch_and_cache` treats a failed
 name fetch as a real error but a failed cover fetch as log-only — a game
 with a name and no art is still strictly better than falling back to the
 filename. `cached_name`/`cached_cover` never hit the network; a cache miss
@@ -93,13 +131,20 @@ checkout:
 1. Only on a machine with no toolchain (no cargo or no GTK4 headers) does it
    install build deps via apt (cargo, rustc, gtk4/adwaita dev headers,
    `wget`, `zsync`, `file`, `desktop-file-utils`); that is the one part
-   needing root. In CI the workflow installs the packaging tools, and the
+   needing root, run through `sudo` when the script isn't root. In CI the workflow installs the packaging tools, and the
    script stops early if `wget`, `file` or `desktop-file-validate` is missing.
 2. `cargo build --release --locked`. Rust is pinned in `rust-toolchain.toml`;
    bump it there and in both workflows together (each checks it).
 3. Assembles the AppDir (binary, privileged script, polkit policy, appdata,
    desktop file, icon, generated `AppRun`) and runs `desktop-file-validate`
-   on the copied desktop file (fatal).
+   on the copied desktop file (fatal). `AppRun` only starts the app; it asks
+   for no password. The privileged script and policy must sit at fixed
+   system paths for polkit, and `setup::run_system_setup` installs them,
+   only when the user starts the automatic setup and the system copies are
+   missing or differ: one pkexec call runs `scripts/install-privileged.sh`
+   (compiled into the binary), which installs both checksum-verified and
+   then runs the setup script. When they are current, pkexec runs the
+   script directly and polkit shows the policy's own message.
 4. Downloads `appimagetool` (pinned to 1.9.1 and verified against a SHA-256
    checksum in the script, cached in `.cache/`) and packs the AppDir into
    `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
@@ -123,15 +168,19 @@ checkout:
 4. Commit, push to `main`.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The tag push triggers `.github/workflows/release.yml` ("Build and
-   Release"). Its `build` job has a read-only token: it checks the tag matches
-   `Cargo.toml` and the changelog, runs `cargo test --locked`, then
-   `build-appimage.sh`. A separate `publish` job, the only one with write
+   Release"). It first runs the whole of `ci.yml` (called as a reusable
+   workflow: build, tests, clippy with `-D warnings`, shellcheck, the
+   changelog and AppStream checks) on the tagged commit. Only then does its
+   `build` job, with a read-only token, check the tag matches `Cargo.toml`
+   and the changelog and run `build-appimage.sh`. A separate `publish` job, the only one with write
    access, attaches the AppImage (+ `.zsync`) to a GitHub Release via
    `softprops/action-gh-release`, with that version's changelog section as
    the release text.
 
 Actions in both workflows are pinned to full commit SHAs; Dependabot
-(`.github/dependabot.yml`) proposes the updates.
+(`.github/dependabot.yml`) proposes the updates. Every job has a
+`timeout-minutes`; CI cancels a superseded pull-request run, and a release
+is never cancelled midway (one per tag at a time).
 
 ## Changelog
 
@@ -145,7 +194,8 @@ Actions in both workflows are pinned to full commit SHAs; Dependabot
   (`scripts/release_notes.py`), never a link to the changelog. The
   release fails if the section is missing.
 - The appdata `<releases>` list is generated from the headings
-  (`scripts/sync_appdata_releases.py`). Don't edit it by hand.
+  (`scripts/sync_appdata_releases.py`). Don't edit it by hand. The script
+  fails when the metadata doesn't have exactly one `<releases>` block.
 
 ## Conventions
 
