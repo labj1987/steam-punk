@@ -1154,26 +1154,6 @@ fn wire_stop_button(
 //  .NET one-time setup dialog
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Exact manual commands, shown only inside the collapsed disclosure — the
-/// default path is the "Set Up Automatically" button, which runs the same
-/// commands itself via setup::run_system_setup / setup::install_dotnet48.
-fn manual_commands(target: &LaunchTarget) -> String {
-    let winetricks = format!(
-        "WINEPREFIX={} winetricks -q dotnet48 win10",
-        target.prefix_dir().display()
-    );
-    if setup::apt_available() {
-        format!(
-            "dpkg --add-architecture i386 && apt update && apt install -y winetricks cabextract wine32:i386\n{winetricks}"
-        )
-    } else {
-        format!(
-            "# Install winetricks, cabextract and 32-bit wine support with your\n\
-# distribution's package manager, then:\n{winetricks}"
-        )
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn show_dotnet_dialog(
     window: &ApplicationWindow,
@@ -1190,7 +1170,9 @@ fn show_dotnet_dialog(
     let automatic = setup::apt_available();
     let body = if automatic {
         "This game needs a one-time Windows compatibility component before trainers \
-will run. This will ask for your password once, then take a minute or two."
+will run. Setup copies it from another game on this system that has it. If none does, \
+it is installed instead, which needs the game closed and may ask for your password. \
+It takes a minute or two."
     } else {
         "This game needs a one-time Windows compatibility component before trainers \
 will run. Automatic setup is only available on Debian/Ubuntu-based systems; run the \
@@ -1198,7 +1180,7 @@ commands below yourself, then launch the trainer again."
     };
     let body = format!("{body}\n\nPrefix check: {health}.");
 
-    let commands_label = Label::new(Some(&manual_commands(&target)));
+    let commands_label = Label::new(Some(&setup::manual_commands(&target, automatic)));
     commands_label.set_wrap(true);
     commands_label.set_xalign(0.0);
     commands_label.set_selectable(true);
@@ -1237,6 +1219,7 @@ commands below yourself, then launch the trainer again."
     // moved directly — the dialog only ever fires one response in practice.
     let state: Rc<RefCell<Option<(LaunchTarget, Trainer)>>> =
         Rc::new(RefCell::new(Some((target, trainer))));
+    let setup_window = window.clone();
     // Held by the response handler so the pending marker lasts as long as the
     // dialog (and the setup it triggers, which takes the guard along).
     let guard_slot: Rc<RefCell<Option<Rc<PendingLaunch>>>> = Rc::new(RefCell::new(Some(guard)));
@@ -1251,18 +1234,39 @@ commands below yourself, then launch the trainer again."
         let Some(guard) = guard_slot.borrow_mut().take() else {
             return;
         };
-        run_automatic_setup(target, trainer, toast_overlay.clone(), running.clone(), refresh_slot.clone(), guard);
+        run_automatic_setup(
+            setup_window.clone(),
+            target,
+            trainer,
+            toast_overlay.clone(),
+            running.clone(),
+            refresh_slot.clone(),
+            guard,
+        );
     });
 
     dialog.present(Some(window));
 }
 
-/// Runs the two-phase setup (privileged system packages, then user-level
-/// winetricks install) off the main thread, then auto-launches the trainer
-/// on success. Errors from either phase surface via a toast with the real
-/// error message; the setup script and install_dotnet48 both also log to
-/// /var/log/steam-punk.log.
+/// What the first, game-running part of the automatic setup found.
+enum CloneOutcome {
+    /// .NET was copied in from another prefix and checks out: launch.
+    Ready(LaunchTarget),
+    /// Nothing on this system to copy from: the installer is needed.
+    NoDonor(LaunchTarget),
+}
+
+/// Runs the automatic setup off the main thread. First, with the game still
+/// running, it clones a working .NET from another game's prefix and, if that
+/// checks out, launches the trainer. Cloning is tried first, and the
+/// Microsoft installer only as a fallback: on Wine's new wow64 mode that
+/// installer fails outright and its rollback strips .NET back out, leaving
+/// the prefix worse than it started. Cloning needs no system packages
+/// either, so the pkexec prompt is only reached when there's nothing to
+/// clone. Errors surface via a toast with the real error message; the setup
+/// script and install_dotnet48 also log to /var/log/steam-punk.log.
 fn run_automatic_setup(
+    window: ApplicationWindow,
     target: LaunchTarget,
     trainer: Trainer,
     toast_overlay: ToastOverlay,
@@ -1274,45 +1278,129 @@ fn run_automatic_setup(
 
     spawn_async(
         async move {
-            tokio::task::spawn_blocking(move || -> anyhow::Result<LaunchTarget> {
-                // Cloning from a prefix that already works is tried first, and
-                // the Microsoft installer only as a fallback: on Wine's new
-                // wow64 mode that installer fails outright and its rollback
-                // strips .NET back out, leaving the prefix worse than it
-                // started. Cloning needs no system packages either, so the
-                // pkexec prompt is only reached when there's nothing to clone.
+            tokio::task::spawn_blocking(move || -> anyhow::Result<CloneOutcome> {
                 if !launcher::repair_dotnet_from_sibling_prefix(&target)? {
-                    if !setup::system_prereqs_present() {
-                        setup::run_system_setup()?;
-                    }
-                    setup::install_dotnet48(&target.prefix_dir())?;
+                    return Ok(CloneOutcome::NoDonor(target));
                 }
-
-                if !launcher::has_usable_dotnet(&target) {
+                let (usable, health) = launcher::prefix_health(&target);
+                if !usable {
                     anyhow::bail!(
-                        "Couldn't get a working .NET runtime into this game's prefix. No other \
-                         game's Proton prefix on this system had one to copy, and the installer \
-                         didn't complete. The details are in ~/.local/share/steam-punk/steam-punk.log."
+                        "Copied .NET from another game's prefix, but this one still isn't ready \
+                         ({health}). The details are in ~/.local/share/steam-punk/steam-punk.log."
                     );
                 }
-
-                Ok(target)
+                Ok(CloneOutcome::Ready(target))
             })
             .await
         },
-        move |result| {
-            let target = match result {
-                Ok(Ok(t)) => t,
-                Ok(Err(e)) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e}")));
-                    return;
+        move |result| match result {
+            Ok(Ok(CloneOutcome::Ready(target))) => {
+                launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard)
+            }
+            Ok(Ok(CloneOutcome::NoDonor(target))) => {
+                show_quit_game_dialog(&window, target, toast_overlay, guard, false)
+            }
+            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e:#}"))),
+            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
+        },
+    );
+}
+
+/// The quit-game dialog's pending install, taken by its one response.
+type InstallSlot = Rc<RefCell<Option<(LaunchTarget, Rc<PendingLaunch>)>>>;
+
+/// How long Install waits for the game's wineserver to go away after the
+/// user quit the game (it lingers a few seconds after the last process).
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The installer fallback. winetricks can't run against a prefix a game is
+/// using (see setup::install_dotnet48), so the user quits the game first;
+/// the trainer is launched by hand once the game is running again.
+fn show_quit_game_dialog(
+    window: &ApplicationWindow,
+    target: LaunchTarget,
+    toast_overlay: ToastOverlay,
+    guard: Rc<PendingLaunch>,
+    still_running: bool,
+) {
+    let mut body = "No other game on this system has a working .NET runtime to copy, so it \
+has to be installed with Microsoft's installer, which can only run while the game is closed. \
+Quit the game, then press Install. When it is done, start the game again and launch the \
+trainer."
+        .to_string();
+    if still_running {
+        body.push_str("\n\nThe game is still running.");
+    }
+    let dialog = AlertDialog::builder()
+        .heading("Quit the Game to Continue")
+        .body(&body)
+        .build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("install", "Install")]);
+    dialog.set_response_appearance("install", ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("install"));
+    dialog.set_close_response("cancel");
+
+    let state: InstallSlot = Rc::new(RefCell::new(Some((target, guard))));
+    let parent = window.clone();
+    dialog.connect_response(None, move |_dialog, response| {
+        let Some((target, guard)) = state.borrow_mut().take() else {
+            return;
+        };
+        if response != "install" {
+            return;
+        }
+        run_installer(parent.clone(), target, toast_overlay.clone(), guard);
+    });
+    dialog.present(Some(window));
+}
+
+enum InstallOutcome {
+    Done,
+    StillRunning(LaunchTarget),
+}
+
+fn run_installer(
+    window: ApplicationWindow,
+    target: LaunchTarget,
+    toast_overlay: ToastOverlay,
+    guard: Rc<PendingLaunch>,
+) {
+    toast_overlay.add_toast(Toast::new("Installing .NET — this takes a few minutes…"));
+    spawn_async(
+        async move {
+            tokio::task::spawn_blocking(move || -> anyhow::Result<InstallOutcome> {
+                let prefix = target.prefix_dir();
+                let deadline = std::time::Instant::now() + QUIT_WAIT;
+                while launcher::prefix_in_use(&prefix) {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(InstallOutcome::StillRunning(target));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                Err(e) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
-                    return;
+                if !setup::system_prereqs_present() {
+                    setup::run_system_setup()?;
                 }
-            };
-            launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard);
+                setup::install_dotnet48(&target)?;
+                let (usable, health) = launcher::prefix_health(&target);
+                if !usable {
+                    anyhow::bail!(
+                        "The .NET installer finished, but the prefix still isn't ready ({health}). \
+                         The details are in ~/.local/share/steam-punk/steam-punk.log."
+                    );
+                }
+                Ok(InstallOutcome::Done)
+            })
+            .await
+        },
+        move |result| match result {
+            Ok(Ok(InstallOutcome::Done)) => toast_overlay.add_toast(Toast::new(
+                ".NET is installed. Start the game again, then launch the trainer.",
+            )),
+            Ok(Ok(InstallOutcome::StillRunning(target))) => {
+                show_quit_game_dialog(&window, target, toast_overlay, guard, true)
+            }
+            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e:#}"))),
+            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
         },
     );
 }

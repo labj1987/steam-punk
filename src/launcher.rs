@@ -274,10 +274,11 @@ pub struct DotnetStatus {
 
 impl DotnetStatus {
     pub fn is_usable(&self) -> bool {
-        self.clr_present
-            && self.mscoree_native
-            && self.crt_present
-            && self.release.is_some_and(|r| r >= DOTNET_462_RELEASE)
+        self.clr_present && self.mscoree_native && self.crt_present && self.release_ok()
+    }
+
+    fn release_ok(&self) -> bool {
+        self.release.is_some_and(|r| r >= DOTNET_462_RELEASE)
     }
 
     /// One-line prefix health status, e.g. for the setup dialog and the
@@ -296,7 +297,7 @@ impl DotnetStatus {
         if !self.crt_present {
             missing.push("CLR support libraries");
         }
-        if self.release.is_none_or(|r| r < DOTNET_462_RELEASE) {
+        if !self.release_ok() {
             missing.push("a .NET 4.6.2+ registry entry");
         }
         format!(".NET runtime not usable (missing {})", missing.join(", "))
@@ -362,20 +363,39 @@ pub fn dotnet_status(prefix: &Path) -> DotnetStatus {
     }
 }
 
-/// True when the prefix can actually run a current .NET trainer. Each
-/// component is logged because they fail independently — a prefix can have a
-/// real mscoree.dll and a 4.8 registry while still missing the CRT files.
-pub fn has_usable_dotnet(target: &LaunchTarget) -> bool {
-    prefix_health(target).0
-}
-
-/// `has_usable_dotnet`'s check, also returning the one-line status shown to
-/// the user before a launch that can't proceed.
+/// Whether the prefix can actually run a current .NET trainer, and the
+/// one-line status shown to the user before a launch that can't proceed.
+/// Each component is logged because they fail independently — a prefix can
+/// have a real mscoree.dll and a 4.8 registry while still missing the CRT
+/// files.
+///
+/// The files are checked on disk. The registry is too, except while the
+/// game's wineserver is running and the on-disk `Release` falls short: the
+/// server holds the registry in memory and only writes `system.reg` out
+/// periodically and on exit, so keys imported moments ago (the repair's
+/// regedit step) aren't on disk yet. Then the running server itself is asked
+/// (`reg query` through the game's Proton). A good on-disk value is trusted
+/// as is, which keeps the usual pre-launch check free of a wine round trip.
 pub fn prefix_health(target: &LaunchTarget) -> (bool, String) {
-    let s = dotnet_status(&target.prefix_dir());
+    let prefix = target.prefix_dir();
+    let mut s = dotnet_status(&prefix);
+    if !s.release_ok() && prefix_in_use(&prefix) {
+        match live_dotnet_release(target) {
+            Ok(release) => {
+                crate::applog::log(&format!(
+                    "prefix_health: on-disk Release {:?}, running wineserver reports {release:?}",
+                    s.release
+                ));
+                s.release = release;
+            }
+            Err(e) => crate::applog::log(&format!(
+                "prefix_health: could not query the running wineserver's registry: {e:#}"
+            )),
+        }
+    }
     let usable = s.is_usable();
     crate::applog::log(&format!(
-        "has_usable_dotnet -> {usable} (clr.dll: {}, native mscoree.dll: {}, \
+        "prefix_health -> usable {usable} (clr.dll: {}, native mscoree.dll: {}, \
          clr CRT libs: {}, Release: {})",
         s.clr_present,
         s.mscoree_native,
@@ -384,6 +404,200 @@ pub fn prefix_health(target: &LaunchTarget) -> (bool, String) {
             .map_or_else(|| "absent".to_string(), |r| format!("{r} (need >= {DOTNET_462_RELEASE})")),
     ));
     (usable, s.summary())
+}
+
+/// The registry key holding the installed .NET 4.x `Release`.
+const NDP_V4_FULL_KEY: &str = r"HKLM\Software\Microsoft\NET Framework Setup\NDP\v4\Full";
+
+/// `Release` as the running wineserver has it, read with `reg query` through
+/// the game's own Proton (the same `proton runinprefix` the trainer uses, so
+/// it joins the game's wineserver with the game's settings). `Ok(None)` when
+/// the key or value doesn't exist.
+fn live_dotnet_release(target: &LaunchTarget) -> Result<Option<u32>> {
+    let proton = target.proton_dir.join("proton");
+    let out = std::process::Command::new(&proton)
+        .args(["runinprefix", "reg", "query", NDP_V4_FULL_KEY, "/v", "Release"])
+        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
+        .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
+        // With PROTON_LOG set, Proton sends wine's stdout to its log file.
+        .env_remove("PROTON_LOG")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("running reg query via {}", proton.display()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    match parse_reg_query_dword(&stdout, "Release") {
+        Some(v) => Ok(Some(v)),
+        // reg.exe exits 1 when the key or value is missing.
+        None if out.status.code() == Some(1) => Ok(None),
+        None => Err(anyhow!(
+            "reg query exited {} without a Release value: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// A REG_DWORD value from `reg query` output, e.g.
+/// `    Release    REG_DWORD    0x80ff4`.
+fn parse_reg_query_dword(output: &str, name: &str) -> Option<u32> {
+    output.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if !fields.next()?.eq_ignore_ascii_case(name) || fields.next()? != "REG_DWORD" {
+            return None;
+        }
+        let value = fields.next()?;
+        let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+        u32::from_str_radix(hex, 16).ok()
+    })
+}
+
+/// Wine's per-prefix server directory, `/tmp/.wine-<uid>/server-<dev>-<ino>`
+/// (hex), keyed by the prefix directory's device and inode. A wineserver
+/// serving the prefix runs with this as its working directory.
+fn wine_server_dir(prefix: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(prefix).ok()?;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    Some(PathBuf::from(format!(
+        "/tmp/.wine-{uid}/server-{:x}-{:x}",
+        meta.dev(),
+        meta.ino()
+    )))
+}
+
+/// True while any wineserver serves `prefix` — the game's, or any other
+/// wine session in it. Identified the way wine itself pairs servers with
+/// prefixes (the server directory above), so it doesn't depend on which
+/// environment the server was started with.
+pub fn prefix_in_use(prefix: &Path) -> bool {
+    let Some(server_dir) = wine_server_dir(prefix) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_name().to_string_lossy().parse::<u32>().is_ok()
+            && std::fs::read_link(entry.path().join("exe"))
+                .is_ok_and(|exe| normalize_lexical(&exe).to_string_lossy().ends_with("/wineserver"))
+            && std::fs::read_link(entry.path().join("cwd")).is_ok_and(|cwd| cwd == server_dir)
+    })
+}
+
+/// How a variable is changed for a command run with Proton's wine.
+#[derive(Debug, PartialEq)]
+pub enum EnvChange {
+    Set(&'static str, String),
+    /// Put this in front of the variable's current value (`:`-separated).
+    Prepend(&'static str, String),
+    Unset(&'static str),
+}
+
+/// The game's own Proton build's wine, set up the way Proton (and
+/// protontricks) run it, for tools that drive wine themselves — winetricks.
+/// Using the system wine against a Proton prefix instead runs a different
+/// wine build over it: a mismatched wineboot, or a "version mismatch" from
+/// the game's wineserver.
+pub struct ProtonWine {
+    files: PathBuf,
+    prefix: PathBuf,
+}
+
+impl ProtonWine {
+    pub fn for_target(target: &LaunchTarget) -> Result<Self> {
+        let files = target.proton_dir.join("files");
+        for bin in ["bin/wine", "bin/wineserver"] {
+            if !files.join(bin).is_file() {
+                return Err(anyhow!(
+                    "The game's Proton build at {} has no {bin}, so the .NET installer can't \
+                     be run with the wine that matches this prefix.",
+                    target.proton_dir.display()
+                ));
+            }
+        }
+        Ok(Self { files, prefix: target.prefix_dir() })
+    }
+
+    pub fn wineserver(&self) -> PathBuf {
+        self.files.join("bin/wineserver")
+    }
+
+    fn path(&self, rel: &str) -> String {
+        self.files.join(rel).to_string_lossy().into_owned()
+    }
+
+    /// Mirrors what Proton's own script sets for its wine (`init_wine`):
+    /// its bin dir first on PATH, its unix libraries and DLL directories,
+    /// and no inherited WINEARCH.
+    pub fn env(&self) -> Vec<EnvChange> {
+        let wine = self.path("bin/wine");
+        vec![
+            EnvChange::Set("WINEPREFIX", self.prefix.to_string_lossy().into_owned()),
+            EnvChange::Set("WINE", wine.clone()),
+            EnvChange::Set("WINELOADER", wine),
+            EnvChange::Set("WINESERVER", self.path("bin/wineserver")),
+            EnvChange::Set(
+                "WINEDLLPATH",
+                format!("{}:{}", self.path("lib/vkd3d"), self.path("lib/wine")),
+            ),
+            EnvChange::Prepend(
+                "LD_LIBRARY_PATH",
+                format!(
+                    "{}:{}",
+                    self.path("lib/x86_64-linux-gnu"),
+                    self.path("lib/i386-linux-gnu")
+                ),
+            ),
+            EnvChange::Prepend("PATH", self.path("bin")),
+            EnvChange::Unset("WINEARCH"),
+        ]
+    }
+
+    pub fn apply(&self, cmd: &mut std::process::Command) {
+        for change in self.env() {
+            match change {
+                EnvChange::Set(k, v) => {
+                    cmd.env(k, v);
+                }
+                EnvChange::Prepend(k, v) => {
+                    let value = match std::env::var(k) {
+                        Ok(cur) if !cur.is_empty() => format!("{v}:{cur}"),
+                        _ => v,
+                    };
+                    cmd.env(k, value);
+                }
+                EnvChange::Unset(k) => {
+                    cmd.env_remove(k);
+                }
+            }
+        }
+    }
+
+    /// The same environment as a shell command prefix (`env -u … VAR=…`),
+    /// for the manual instructions.
+    pub fn shell_env(&self) -> String {
+        let mut unset = Vec::new();
+        let mut set = Vec::new();
+        for change in self.env() {
+            match change {
+                EnvChange::Set(k, v) => set.push(format!("{k}={}", shell_quote(&v))),
+                EnvChange::Prepend(k, v) => {
+                    set.push(format!("{k}={}\"${{{k}:+:${k}}}\"", shell_quote(&v)))
+                }
+                EnvChange::Unset(k) => unset.push(format!("-u {k}")),
+            }
+        }
+        let mut parts = vec!["env".to_string()];
+        parts.extend(unset);
+        parts.extend(set);
+        parts.join(" ")
+    }
+}
+
+/// Single-quotes `s` for a POSIX shell.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Logs each `dosdevices/` drive-letter mapping in the prefix and whether its
@@ -1056,6 +1270,46 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
     Ok(())
 }
 
+/// Every `steamapps/compatdata` folder on this system: each library of the
+/// Steam install the game runs from, plus those of any other Steam install
+/// (native or Flatpak), without duplicates.
+fn compatdata_roots(target: &LaunchTarget) -> Vec<PathBuf> {
+    let mut clients = vec![target.client_dir.clone()];
+    clients.extend(steam::metadata_roots());
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut roots = Vec::new();
+    for client in clients {
+        for lib in steam::library_folders(&client) {
+            let root = lib.join("steamapps/compatdata");
+            let canon = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+            if root.is_dir() && !seen.contains(&canon) {
+                seen.push(canon);
+                roots.push(root);
+            }
+        }
+    }
+    roots
+}
+
+/// The first Proton prefix under any of `roots` (in order, entries sorted by
+/// name so the choice is stable) that isn't `ours` and has a usable .NET.
+/// Read-only: a donor is only ever copied from.
+fn find_donor_prefix(roots: &[PathBuf], ours: &Path) -> Option<PathBuf> {
+    let ours_canon = std::fs::canonicalize(ours).unwrap_or_else(|_| ours.to_path_buf());
+    roots.iter().find_map(|root| {
+        let mut prefixes: Vec<PathBuf> = std::fs::read_dir(root)
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join("pfx"))
+            .collect();
+        prefixes.sort();
+        prefixes.into_iter().find(|p| {
+            std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) != ours_canon
+                && dotnet_status(p).is_usable()
+        })
+    })
+}
+
 /// Rebuild a prefix's .NET runtime by cloning it from another Proton prefix on
 /// this system that already has a working one.
 ///
@@ -1071,19 +1325,8 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
 ///
 /// Returns Ok(false) if no prefix on this system had a usable .NET to clone.
 pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> {
-    let Some(compatdata_root) = target.compatdata_dir.parent() else {
-        return Ok(false);
-    };
-    let Ok(entries) = std::fs::read_dir(compatdata_root) else {
-        return Ok(false);
-    };
-
     let ours = target.prefix_dir();
-    let donor = entries
-        .flatten()
-        .map(|e| e.path().join("pfx"))
-        .filter(|p| *p != ours)
-        .find(|p| dotnet_status(p).is_usable());
+    let donor = find_donor_prefix(&compatdata_roots(target), &ours);
 
     let Some(donor) = donor else {
         crate::applog::log(
@@ -1439,6 +1682,104 @@ mod tests {
         assert!(!should_warn_anticheat(false, false, None));
     }
 
+    #[test]
+    fn reg_query_dword_is_parsed() {
+        let out = "\r\nHKEY_LOCAL_MACHINE\\Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\r\n    Release    REG_DWORD    0x80ff4\r\n\r\n";
+        assert_eq!(parse_reg_query_dword(out, "Release"), Some(0x80ff4));
+        assert_eq!(parse_reg_query_dword(out, "Version"), None);
+        assert_eq!(parse_reg_query_dword("    Release    REG_SZ    4.8\n", "Release"), None);
+        assert_eq!(parse_reg_query_dword("", "Release"), None);
+    }
+
+    /// A prefix that passes `dotnet_status`, built from the same pieces the
+    /// real check looks at.
+    fn fake_dotnet_prefix(pfx: &Path) {
+        let fw = pfx.join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319");
+        std::fs::create_dir_all(&fw).unwrap();
+        std::fs::write(fw.join("clr.dll"), b"MZ real").unwrap();
+        let sys32 = pfx.join("drive_c/windows/system32");
+        std::fs::create_dir_all(&sys32).unwrap();
+        std::fs::write(sys32.join("mscoree.dll"), b"MZ real").unwrap();
+        std::fs::write(sys32.join("vcruntime140_clr0400.dll"), b"MZ real").unwrap();
+        std::fs::write(
+            pfx.join("system.reg"),
+            "[Software\\\\Microsoft\\\\NET Framework Setup\\\\NDP\\\\v4\\\\Full] 1\n\"Release\"=dword:00080ff4\n",
+        )
+        .unwrap();
+        assert!(dotnet_status(pfx).is_usable());
+    }
+
+    #[test]
+    fn donor_is_found_in_another_steam_library() {
+        let s = Scratch::new("donor");
+        let lib_a = s.0.join("a/steamapps/compatdata");
+        let lib_b = s.0.join("b/steamapps/compatdata");
+        let ours = lib_a.join("100/pfx");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::create_dir_all(lib_a.join("101/pfx")).unwrap();
+        fake_dotnet_prefix(&lib_b.join("200/pfx"));
+        let roots = vec![lib_a.clone(), lib_b.clone()];
+        assert_eq!(find_donor_prefix(&roots, &ours), Some(lib_b.join("200/pfx")));
+        // Only the target's own library: nothing to copy from.
+        assert_eq!(find_donor_prefix(&roots[..1], &ours), None);
+        // The game's own prefix never donates to itself, even when usable.
+        fake_dotnet_prefix(&ours);
+        assert_eq!(find_donor_prefix(&roots[..1], &ours), None);
+    }
+
+    #[test]
+    fn proton_wine_env_points_at_the_proton_build() {
+        let s = Scratch::new("protonwine");
+        let proton = s.0.join("Proton 9.0");
+        let target = LaunchTarget {
+            appid: 1,
+            client_dir: s.0.join("Steam"),
+            compatdata_dir: s.0.join("compatdata/1"),
+            proton_dir: proton.clone(),
+        };
+        assert!(ProtonWine::for_target(&target).is_err(), "no wine binaries yet");
+        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
+        std::fs::write(proton.join("files/bin/wine"), b"").unwrap();
+        std::fs::write(proton.join("files/bin/wineserver"), b"").unwrap();
+        let wine = ProtonWine::for_target(&target).unwrap();
+
+        let mut cmd = std::process::Command::new("true");
+        wine.apply(&mut cmd);
+        let envs: HashMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        let files = proton.join("files");
+        let at = |rel: &str| files.join(rel).to_string_lossy().into_owned();
+        assert_eq!(envs["WINE"].as_deref(), Some(at("bin/wine").as_str()));
+        assert_eq!(envs["WINESERVER"].as_deref(), Some(at("bin/wineserver").as_str()));
+        assert_eq!(
+            envs["WINEPREFIX"].as_deref(),
+            Some(s.0.join("compatdata/1/pfx").to_string_lossy().as_ref())
+        );
+        assert!(envs["PATH"].as_deref().unwrap().starts_with(&format!("{}:", at("bin"))));
+        assert_eq!(envs["WINEARCH"], None, "WINEARCH is removed");
+    }
+
+    #[test]
+    fn shell_quote_survives_quotes_and_spaces() {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", shell_quote("it's a \"Proton\" $dir")))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "it's a \"Proton\" $dir");
+    }
+
+    #[test]
+    fn a_prefix_without_a_wineserver_is_not_in_use() {
+        let s = Scratch::new("inuse");
+        assert!(!prefix_in_use(&s.0));
+        let dir = wine_server_dir(&s.0).unwrap();
+        assert!(dir.to_string_lossy().starts_with("/tmp/.wine-"), "{dir:?}");
+        assert!(!prefix_in_use(&s.0.join("missing")));
+    }
+
     fn info() -> LaunchInfo {
         LaunchInfo {
             log_path: PathBuf::from("/dev/null"),
@@ -1509,6 +1850,77 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(gone, "the tracked trainer was stopped and reaped");
+    }
+
+    /// Live check of the Proton paths against a throwaway prefix, never a
+    /// game's: `SP_LIVE_PROTON` is a Proton build, `SP_LIVE_COMPATDATA` a
+    /// scratch compatdata dir whose `pfx` that build already created. A
+    /// persistent wineserver of that build stands in for the running game.
+    /// With `SP_LIVE_WINETRICKS=1` it then runs the real installer fallback.
+    /// Not run in CI.
+    #[test]
+    #[ignore]
+    fn live_proton_registry_and_installer() {
+        let proton = PathBuf::from(std::env::var("SP_LIVE_PROTON").expect("SP_LIVE_PROTON"));
+        let compat = PathBuf::from(std::env::var("SP_LIVE_COMPATDATA").expect("SP_LIVE_COMPATDATA"));
+        let target = LaunchTarget {
+            appid: 0,
+            client_dir: steam::steam_client_dir().expect("Steam install"),
+            compatdata_dir: compat.clone(),
+            proton_dir: proton,
+        };
+        let prefix = target.prefix_dir();
+        assert!(prefix.join("system.reg").is_file(), "create the scratch prefix first");
+        let wine = ProtonWine::for_target(&target).unwrap();
+        let wait_for = |want: bool| {
+            for _ in 0..100 {
+                if prefix_in_use(&prefix) == want {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            panic!("prefix_in_use never became {want}");
+        };
+
+        // "The game is running."
+        let mut server = std::process::Command::new(wine.wineserver());
+        wine.apply(&mut server);
+        assert!(server.env("STEAM_COMPAT_DATA_PATH", &compat).arg("-p").status().unwrap().success());
+        wait_for(true);
+        let err = crate::setup::install_dotnet48(&target).unwrap_err();
+        println!("installer while running: {err:#}");
+        assert!(err.to_string().contains("still running"), "{err:#}");
+
+        // The repair's registry import into the running server, then the check.
+        let donor = Scratch::new("live-donor");
+        std::fs::write(
+            donor.0.join("system.reg"),
+            "WINE REGISTRY Version 2\n\n[Software\\\\Microsoft\\\\NET Framework Setup\\\\NDP\\\\v4\\\\Full] 1700000000\n#time=1\n\"Release\"=dword:00080ff4\n\"Version\"=\"4.8.04084\"\n",
+        )
+        .unwrap();
+        apply_dotnet_registry(&target, &donor.0).unwrap();
+        let disk = dotnet_release(&prefix);
+        let live = live_dotnet_release(&target).unwrap();
+        println!("right after the import: on disk {disk:?}, live {live:?}");
+        assert_eq!(live, Some(0x80ff4));
+        let (_, health) = prefix_health(&target);
+        println!("prefix_health: {health}");
+        assert!(!health.contains("registry entry"), "{health}");
+
+        // "The game was quit": the server flushes the registry as it exits.
+        let mut kill = std::process::Command::new(wine.wineserver());
+        wine.apply(&mut kill);
+        assert!(kill.arg("-k").status().unwrap().success());
+        wait_for(false);
+        println!("after the server exited: on disk {:?}", dotnet_release(&prefix));
+
+        if std::env::var("SP_LIVE_WINETRICKS").as_deref() == Ok("1") {
+            let started = std::time::Instant::now();
+            let result = crate::setup::install_dotnet48(&target);
+            println!("installer with the game closed ({}s): {result:?}", started.elapsed().as_secs());
+            println!("prefix: {}", dotnet_status(&prefix).summary());
+            assert!(!prefix_in_use(&prefix), "the installer's wineserver was left running");
+        }
     }
 
     /// Live end-to-end check against a real running game + trainer (GTA San

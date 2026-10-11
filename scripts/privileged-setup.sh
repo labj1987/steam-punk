@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # privileged-setup.sh — runs as root via pkexec.
-# One-time system package setup for wine .NET installs. Idempotent —
-# apt no-ops if packages are already present, safe to invoke every launch.
+# One-time system package setup for the .NET installer: winetricks and the
+# cabextract it unpacks the Microsoft installers with. winetricks runs with the
+# game's own Proton wine, so no system wine packages are needed. Idempotent —
+# apt no-ops if packages are already present.
 
 set -uo pipefail
 
@@ -13,10 +15,21 @@ log() {
 }
 die() { log "ERROR: $*"; exit 1; }
 
-log "==== Wine .NET prerequisite setup started ===="
-dpkg --add-architecture i386 || die "dpkg --add-architecture i386 failed"
-apt-get update >>"$LOGFILE" 2>&1 || die "apt-get update failed"
-apt-get install -y winetricks cabextract wine32:i386 >>"$LOGFILE" 2>&1 \
-    || die "apt-get install failed"
+log "==== .NET installer prerequisite setup started ===="
+# A failed refresh (typically one broken third-party repository) doesn't stop
+# the install: apt still has the package lists from the last good update, and
+# winetricks and cabextract are in the distribution's own repositories. Only
+# the install failing is fatal, and then the update failure is named too.
+update_failed=0
+if ! apt-get update >>"$LOGFILE" 2>&1; then
+    update_failed=1
+    log "WARNING: apt-get update failed (details in $LOGFILE); installing from the existing package lists"
+fi
+if ! apt-get install -y --no-install-recommends winetricks cabextract >>"$LOGFILE" 2>&1; then
+    if [[ $update_failed -eq 1 ]]; then
+        die "apt-get install failed, after apt-get update had also failed (details in $LOGFILE)"
+    fi
+    die "apt-get install failed (details in $LOGFILE)"
+fi
 log "==== Done. System packages ready. ===="
 exit 0

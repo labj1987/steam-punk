@@ -61,66 +61,14 @@ cp data/$APP-256.png "$APPDIR/$APP.png"
 desktop-file-validate "$APPDIR/$APP.desktop"
 
 # ── AppRun ────────────────────────────────────────────────────────────
-# On first launch (or after an update) the privileged script and polkit
-# policy must exist at fixed system paths — polkit refuses relative/user
-# paths — so AppRun installs them via pkexec when missing or outdated, then
-# execs the app.
+# Just starts the app. The privileged setup script and polkit policy it carries are installed
+# to their fixed system paths (polkit refuses relative/user paths) by the app itself, in the
+# same pkexec call that runs the setup, and only when the user starts that setup.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
-APP="steam-punk"
-
-SRC_SCRIPT="$HERE/usr/lib/$APP/privileged-setup.sh"
-SRC_POLICY="$HERE/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"
-DST_SCRIPT="/usr/lib/$APP/privileged-setup.sh"
-DST_POLICY="/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"
-
-needs_install=0
-if [[ ! -f "$DST_SCRIPT" ]] || ! cmp -s "$SRC_SCRIPT" "$DST_SCRIPT"; then
-    needs_install=1
-fi
-if [[ ! -f "$DST_POLICY" ]] || ! cmp -s "$SRC_POLICY" "$DST_POLICY"; then
-    needs_install=1
-fi
-
-if [[ $needs_install -eq 1 ]]; then
-    # Runs as root. Root reads the file straight from the mounted AppImage
-    # when it can (FUSE mounts often deny root), else from a user-staged
-    # copy. Either way it first copies into its own root-owned temp file and
-    # verifies that copy against the SHA-256 computed from the AppImage's
-    # read-only contents, so nothing the user can rewrite after the check is
-    # ever installed (no TOCTOU window).
-    install_verified() {
-        local src="$1" alt="$2" dst="$3" mode="$4" sum="$5" tmp
-        tmp="$(mktemp)" || return 1
-        if ! cat "$src" > "$tmp" 2>/dev/null; then
-            cat "$alt" > "$tmp" || { rm -f "$tmp"; return 1; }
-        fi
-        if [[ "$(sha256sum "$tmp" | cut -d' ' -f1)" != "$sum" ]]; then
-            echo "steam-punk: checksum mismatch for $dst, refusing to install" >&2
-            rm -f "$tmp"
-            return 1
-        fi
-        install -D -m "$mode" "$tmp" "$dst"
-        local rc=$?
-        rm -f "$tmp"
-        return $rc
-    }
-
-    SUM_SCRIPT="$(sha256sum "$SRC_SCRIPT" | cut -d' ' -f1)"
-    SUM_POLICY="$(sha256sum "$SRC_POLICY" | cut -d' ' -f1)"
-    STAGE="$(mktemp -d)"
-    cp "$SRC_SCRIPT" "$STAGE/privileged-setup.sh"
-    cp "$SRC_POLICY" "$STAGE/policy"
-    pkexec bash -c "$(declare -f install_verified)"'
-        install_verified "$1" "$2" "$3" 755 "$4" && install_verified "$5" "$6" "$7" 644 "$8"' \
-        bash "$SRC_SCRIPT" "$STAGE/privileged-setup.sh" "$DST_SCRIPT" "$SUM_SCRIPT" \
-        "$SRC_POLICY" "$STAGE/policy" "$DST_POLICY" "$SUM_POLICY"
-    rm -rf "$STAGE"
-fi
-
 export PATH="$HERE/usr/bin:$PATH"
-exec "$HERE/usr/bin/$APP" "$@"
+exec "$HERE/usr/bin/steam-punk" "$@"
 APPRUN
 chmod 755 "$APPDIR/AppRun"
 
