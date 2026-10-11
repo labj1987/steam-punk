@@ -162,13 +162,26 @@ pub fn build_ui(app: &Application) {
         let self_slot = self_slot.clone();
         let running = running.clone();
         let cover_retry_attempted = cover_retry_attempted.clone();
+        // The last trainers.json problem shown, so a damaged file is reported
+        // once rather than on every refresh.
+        let meta_error_shown: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         Rc::new(move || {
             while let Some(c) = list_box.first_child() {
                 list_box.remove(&c);
             }
 
-            let trainers = library::list_trainers().unwrap_or_default();
+            let listing = library::list_trainers().unwrap_or_else(|e| library::Listing {
+                trainers: Vec::new(),
+                meta_error: Some(format!("{e:#}")),
+            });
+            if listing.meta_error != *meta_error_shown.borrow() {
+                if let Some(e) = &listing.meta_error {
+                    toast_overlay.add_toast(Toast::new(e));
+                }
+                *meta_error_shown.borrow_mut() = listing.meta_error.clone();
+            }
+            let trainers = listing.trainers;
             if trainers.is_empty() {
                 stack.set_visible_child_name("empty");
                 return;
@@ -425,12 +438,7 @@ pub fn build_ui(app: &Application) {
             let mut imported: Vec<std::path::PathBuf> = Vec::new();
             for file in file_list.files() {
                 let Some(path) = file.path() else { continue };
-                let is_exe = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.eq_ignore_ascii_case("exe"))
-                    .unwrap_or(false);
-                if !is_exe {
+                if !library::is_exe(&path) {
                     continue;
                 }
                 match library::import_trainer(&path) {

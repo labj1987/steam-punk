@@ -22,8 +22,61 @@ fn http_client() -> Result<reqwest::Client> {
     let built = reqwest::Client::builder()
         .user_agent("steam-punk (https://github.com/labj1987/steam-punk)")
         .timeout(Duration::from_secs(10))
+        // Every request goes to Steam: a redirect may move between Steam's
+        // own hosts, never off them or off https.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if is_steam_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                let to = attempt.url().to_string();
+                attempt.error(format!("refusing a redirect off Steam to {to}"))
+            }
+        }))
         .build()?;
     Ok(CLIENT.get_or_init(|| built).clone())
+}
+
+/// Steam's image CDN hosts, which is where every cover and thumbnail URL the
+/// Store API hands out points.
+fn is_steam_cdn_host(host: &str) -> bool {
+    host.ends_with(".steamstatic.com") || host == "steamcdn-a.akamaihd.net"
+}
+
+/// An https URL on one of Steam's own hosts (Store API or image CDN), on the
+/// default port and without credentials.
+fn is_steam_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|h| {
+            is_steam_cdn_host(h) || h == "store.steampowered.com"
+        })
+}
+
+/// Image URLs come from Steam API responses (`header_image`, `tiny_image`),
+/// so they are only fetched from Steam's https image CDN.
+fn checked_image_url(url: &str) -> Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid image URL {url:?}"))?;
+    if !(is_steam_url(&parsed) && parsed.host_str().is_some_and(is_steam_cdn_host)) {
+        anyhow::bail!("refusing to fetch an image from outside Steam's https CDN: {url}");
+    }
+    Ok(parsed)
+}
+
+/// True if `bytes` is a whole JPEG or PNG: a readable header and the format's
+/// end marker near the end of the data. A download or copy that was cut off
+/// fails this, so it is never cached, and a cached file that fails it is
+/// treated as missing.
+fn image_is_complete(bytes: &[u8]) -> bool {
+    if image_dimensions(bytes).is_none() {
+        return false;
+    }
+    let tail = &bytes[bytes.len().saturating_sub(64)..];
+    let end_marker: &[u8] = if bytes.starts_with(b"\x89PNG") { b"IEND" } else { &[0xFF, 0xD9] };
+    tail.windows(end_marker.len()).any(|w| w == end_marker)
 }
 
 fn cache_dir() -> Result<PathBuf> {
@@ -101,15 +154,40 @@ async fn fetch_and_cache_online(client: &reqwest::Client, appid: u32) -> Result<
         .and_then(|v| v.get("data"))
         .with_context(|| format!("categories response for AppID {appid} has no data"))?;
     let online = has_online_category(data);
-    std::fs::write(online_cache_path(appid)?, if online { "1" } else { "0" })
+    crate::fsutil::write_atomic(&online_cache_path(appid)?, if online { b"1" } else { b"0" })
         .with_context(|| format!("caching online flag for AppID {appid}"))?;
     Ok(())
 }
 
-/// The cached cover-art image path, if a fetch has previously succeeded.
+/// The cached cover-art image path, if a fetch has previously succeeded and
+/// the file is a whole image (anything else counts as a cache miss, so the
+/// next lookup replaces it).
 pub fn cached_cover(appid: u32) -> Option<PathBuf> {
     let path = cover_cache_path(appid).ok()?;
-    path.is_file().then_some(path)
+    file_is_complete_image(&path).then_some(path)
+}
+
+/// `image_is_complete` for a file, reading only its head and tail.
+fn file_is_complete_image(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut head = Vec::new();
+    if (&mut f).take(128 * 1024).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    if len <= head.len() as u64 {
+        return image_is_complete(&head);
+    }
+    let mut tail = Vec::new();
+    if f.seek(SeekFrom::End(-64)).is_err() || f.read_to_end(&mut tail).is_err() {
+        return false;
+    }
+    // The header decides the format; the tail must carry its end marker.
+    head.extend_from_slice(&tail);
+    image_is_complete(&head)
 }
 
 /// Fetches the game's name and cover art for `appid` and caches both to
@@ -170,7 +248,7 @@ async fn fetch_name_and_cover(appid: u32) -> Result<()> {
     }
 
     let name = name.with_context(|| format!("no name found for AppID {appid}"))?;
-    std::fs::write(name_cache_path(appid)?, &name)
+    crate::fsutil::write_atomic(&name_cache_path(appid)?, name.as_bytes())
         .with_context(|| format!("caching name for AppID {appid}"))?;
 
     if let Some(src) = &local.cover {
@@ -204,7 +282,11 @@ fn cache_local_cover(src: &Path, appid: u32) -> Result<()> {
     if len > MAX_IMAGE_BYTES as u64 {
         anyhow::bail!("{} is larger than {MAX_IMAGE_BYTES} bytes", src.display());
     }
-    std::fs::copy(src, cover_cache_path(appid)?)
+    let bytes = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    if !image_is_complete(&bytes) {
+        anyhow::bail!("{} is not a complete image", src.display());
+    }
+    crate::fsutil::write_atomic(&cover_cache_path(appid)?, &bytes)
         .with_context(|| format!("caching local cover art for AppID {appid}"))?;
     Ok(())
 }
@@ -478,14 +560,15 @@ async fn fetch_cover(client: &reqwest::Client, appid: u32, header_image: Option<
             None => return Err(e),
         },
     };
-    std::fs::write(cover_cache_path(appid)?, bytes)
+    crate::fsutil::write_atomic(&cover_cache_path(appid)?, &bytes)
         .with_context(|| format!("caching cover art for AppID {appid}"))?;
     Ok(())
 }
 
 pub(crate) async fn download_image(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
+    let checked = checked_image_url(url)?;
     let resp = client
-        .get(url)
+        .get(checked)
         .send()
         .await
         .with_context(|| format!("requesting {url}"))?
@@ -505,6 +588,9 @@ pub(crate) async fn download_image(client: &reqwest::Client, url: &str) -> Resul
     let bytes = resp.bytes().await?;
     if bytes.len() > MAX_IMAGE_BYTES {
         anyhow::bail!("{url} image is larger than {MAX_IMAGE_BYTES} bytes");
+    }
+    if !image_is_complete(&bytes) {
+        anyhow::bail!("{url} did not return a complete JPEG or PNG image");
     }
     Ok(bytes.to_vec())
 }
@@ -540,9 +626,9 @@ const MAX_SEARCH_RESULTS: usize = 8;
 /// Downloads a search result's thumbnail into memory (no disk cache — the
 /// picker shows results for many candidate games the user won't pick, so
 /// caching them to `cache_dir()` would just accumulate cruft for AppIDs
-/// nobody ends up choosing). Builds its own short-lived client, same as
-/// `fetch_and_cache`'s image fetch, since there's no long-lived client to
-/// share across a UI-triggered one-off call.
+/// nobody ends up choosing). Uses the same shared client as every other
+/// request; the URL must be on Steam's https image CDN (see
+/// `download_image`).
 pub async fn fetch_thumbnail(url: &str) -> Result<Vec<u8>> {
     let client = http_client()?;
     download_image(&client, url).await
@@ -663,7 +749,10 @@ fn strip_early_access(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{guess_search_term, has_online_category};
+    use super::{
+        checked_image_url, file_is_complete_image, guess_search_term, has_online_category,
+        image_is_complete, is_steam_url,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -781,6 +870,67 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn only_https_steam_cdn_image_urls_are_fetched() {
+        for ok in [
+            "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1/header.jpg?t=1",
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/1/capsule_231x87.jpg",
+            "https://steamcdn-a.akamaihd.net/steam/apps/1/header.jpg",
+        ] {
+            assert!(checked_image_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://shared.akamai.steamstatic.com/a.jpg",
+            "https://evil.example/a.jpg",
+            "https://steamstatic.com.evil.example/a.jpg",
+            "https://evilsteamstatic.com/a.jpg",
+            "https://shared.akamai.steamstatic.com:8443/a.jpg",
+            "https://user@shared.akamai.steamstatic.com/a.jpg",
+            "file:///etc/passwd",
+            "https://store.steampowered.com/api/appdetails",
+            "not a url",
+        ] {
+            assert!(checked_image_url(bad).is_err(), "{bad}");
+        }
+        // Redirects may stay on the Store API host as well as the CDN.
+        let api = reqwest::Url::parse("https://store.steampowered.com/api/storesearch/").unwrap();
+        assert!(is_steam_url(&api));
+        let off = reqwest::Url::parse("https://example.com/").unwrap();
+        assert!(!is_steam_url(&off));
+    }
+
+    #[test]
+    fn cut_off_images_are_not_complete() {
+        let mut jpeg = fake_jpeg(460, 215);
+        jpeg.extend_from_slice(&[0x12; 300]);
+        assert!(!image_is_complete(&jpeg), "no end-of-image marker yet");
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        assert!(image_is_complete(&jpeg));
+
+        let mut png = fake_png(460, 215);
+        png.extend_from_slice(&[0x34; 300]);
+        assert!(!image_is_complete(&png));
+        png.extend_from_slice(b"\0\0\0\0IEND\xaeB`\x82");
+        assert!(image_is_complete(&png));
+
+        assert!(!image_is_complete(b"<html>not an image</html>"));
+    }
+
+    #[test]
+    fn a_torn_cached_cover_counts_as_missing() {
+        let s = Scratch::new("torn-cover");
+        let path = s.0.join("42.jpg");
+        // Bigger than the head read, so the tail is read separately.
+        let mut jpeg = fake_jpeg(460, 215);
+        jpeg.resize(300 * 1024, 0x55);
+        std::fs::write(&path, &jpeg).unwrap();
+        assert!(!file_is_complete_image(&path));
+        jpeg.extend_from_slice(&[0xFF, 0xD9]);
+        std::fs::write(&path, &jpeg).unwrap();
+        assert!(file_is_complete_image(&path));
+        assert!(!file_is_complete_image(&s.0.join("missing.jpg")));
     }
 
     #[test]

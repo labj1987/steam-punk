@@ -1,4 +1,5 @@
 mod applog;
+mod fsutil;
 mod gamedata;
 mod launcher;
 mod library;
