@@ -483,11 +483,12 @@ pub fn build_ui(app: &Application) {
 //
 //  A custom `libadwaita::Dialog` rather than `AlertDialog`: this version
 //  needs several independent ways to finish (a search-result click, the
-//  manual "Add" button, "Skip"), and `AlertDialog` only supports firing one
-//  of its own named responses. Building it from scratch means every one of
-//  those paths is its own button handler that closes the dialog and
-//  advances the queue exactly once — see `confirm`/`advance` below — so
-//  there's no shared response signal two handlers could both fire.
+//  manual "Add" button, "Skip", or just closing it with Escape), and
+//  `AlertDialog` only supports firing one of its own named responses.
+//  Every one of those paths ends by closing the dialog, and the
+//  queue advances from the dialog's `closed` signal, guarded to run exactly
+//  once — so closing it any other way counts as Skip, and no path can
+//  advance twice.
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn prompt_appid_for_queue(
@@ -515,15 +516,18 @@ fn prompt_appid_for_queue(
         .unwrap_or_else(|| filename.clone());
     let guessed_term = gamedata::guess_search_term(&stem);
 
-    // Moves on to the next queued trainer (or finishes the queue). Every
-    // button/row handler below calls this exactly once, after closing the
-    // dialog itself.
+    // Moves on to the next queued trainer (or finishes the queue). Runs from
+    // the dialog's `closed` signal (connected below), at most once.
     let advance: Rc<dyn Fn()> = {
         let window = window.clone();
         let queue = queue.clone();
         let refresh_list = refresh_list.clone();
         let toast_overlay = toast_overlay.clone();
+        let advanced = std::cell::Cell::new(false);
         Rc::new(move || {
+            if advanced.replace(true) {
+                return;
+            }
             prompt_appid_for_queue(
                 window.clone(),
                 queue.clone(),
@@ -590,18 +594,20 @@ fn prompt_appid_for_queue(
     dialog.set_child(Some(&outer));
 
     // Every way of picking an AppID — a search-result row or the manual Add
-    // button — funnels through here exactly once: closes the dialog, saves
-    // the association, kicks off the (fire-and-forget) name/art fetch, and
-    // advances the queue. Fetch failure only logs and still advances —
-    // matches the existing "don't block adding" behavior.
+    // button — funnels through here: saves the association, kicks off the
+    // (fire-and-forget) name/art fetch, and closes the dialog, which advances
+    // the queue. Fetch failure only logs and still advances — matches the
+    // existing "don't block adding" behavior. Only the first pick counts.
     let confirm: Rc<dyn Fn(u32)> = {
         let dialog = dialog.clone();
         let filename = filename.clone();
         let refresh_list = refresh_list.clone();
         let toast_overlay = toast_overlay.clone();
-        let advance = advance.clone();
+        let picked = std::cell::Cell::new(false);
         Rc::new(move |appid: u32| {
-            dialog.close();
+            if picked.replace(true) {
+                return;
+            }
             match library::set_trainer_appid(&filename, appid) {
                 Ok(()) => {
                     let refresh_list2 = refresh_list.clone();
@@ -613,10 +619,10 @@ fn prompt_appid_for_queue(
                     });
                 }
                 Err(e) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Could not save AppID: {e}")));
+                    toast_overlay.add_toast(Toast::new(&format!("Could not save AppID: {e:#}")));
                 }
             }
-            advance();
+            dialog.close();
         })
     };
 
@@ -790,24 +796,20 @@ fn prompt_appid_for_queue(
 
     {
         let dialog = dialog.clone();
-        let advance = advance.clone();
         skip_btn.connect_clicked(move |_| {
             dialog.close();
-            advance();
         });
     }
     {
         let search_entry = search_entry.clone();
         let confirm = confirm.clone();
         let dialog = dialog.clone();
-        let advance = advance.clone();
         let toast_overlay = toast_overlay.clone();
         add_btn.connect_clicked(move |_| {
             let text = search_entry.text();
             let trimmed = text.trim();
             if trimmed.is_empty() {
                 dialog.close();
-                advance();
                 return;
             }
             match trimmed.parse::<u32>() {
@@ -817,11 +819,24 @@ fn prompt_appid_for_queue(
                         "That doesn't look like a numeric AppID — skipped",
                     ));
                     dialog.close();
-                    advance();
                 }
             }
         });
     }
+
+    // The search entry has the focus and takes Escape for itself (as
+    // stop-search), so the dialog's own Escape-to-close never sees it; make
+    // Escape there close the dialog too, i.e. Skip.
+    {
+        let dialog = dialog.clone();
+        search_entry.connect_stop_search(move |_| {
+            dialog.close();
+        });
+    }
+
+    // Whichever way the dialog goes away — a pick, Skip, Add or Escape — the
+    // queue moves on exactly once.
+    dialog.connect_closed(move |_| advance());
 
     dialog.present(Some(&window));
 }
