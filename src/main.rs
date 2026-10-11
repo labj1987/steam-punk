@@ -25,7 +25,6 @@ pub fn runtime() -> &'static Runtime {
 
 fn main() {
     let _ = runtime();
-    applog::init();
 
     // Set program name before GTK init. On Wayland the app_id GNOME sees is
     // the GApplication ID, not prgname; on X11 it's prgname. Setting both
@@ -38,6 +37,12 @@ fn main() {
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::FLAGS_NONE)
         .build();
+
+    // `startup` runs only in the primary instance. A second launch just
+    // forwards `activate` to it over D-Bus and exits, so it must not touch the
+    // log: truncating it would wipe the running session's log, and with it
+    // the offsets that launch diagnoses read the trainer's output back from.
+    app.connect_startup(|_| applog::init());
 
     app.connect_activate(|app| {
         if let Some(window) = app.windows().first() {

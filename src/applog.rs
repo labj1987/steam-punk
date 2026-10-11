@@ -14,6 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Unit tests log to a throwaway file, never the user's real log.
+#[cfg(test)]
+pub fn log_path() -> PathBuf {
+    std::env::temp_dir().join(format!("steam-punk-test-{}.log", std::process::id()))
+}
+
+#[cfg(not(test))]
 pub fn log_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".local/share/steam-punk/steam-punk.log")
@@ -21,6 +28,9 @@ pub fn log_path() -> PathBuf {
 
 /// Starts a fresh log for this run — truncated rather than appended forever,
 /// so the log stays focused on the session that actually hit a problem.
+/// Called from the application's `startup` signal, which only the primary
+/// instance receives (see main.rs), so a second launch never truncates the
+/// running instance's log.
 pub fn init() {
     let path = log_path();
     if let Some(parent) = path.parent() {
