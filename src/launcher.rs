@@ -441,7 +441,6 @@ fn log_dosdevices(target: &LaunchTarget) {
 /// own, and that `kill -TERM -<pgid>` reliably takes down the whole tree
 /// (wrapper + relaunched trainer) in one shot.
 pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Path) -> Result<u32> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     if let Some(parent) = log_path.parent() {
@@ -468,58 +467,105 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
         target.client_dir.display(),
         target.compatdata_dir.display(),
     ));
-    let spawn_result = Command::new(&proton)
-        .arg("runinprefix")
+    let mut cmd = Command::new(&proton);
+    cmd.arg("runinprefix")
         .arg(trainer_path)
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
         .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
         .stdin(Stdio::null())
         .stdout(log_out)
-        .stderr(log_err)
-        .process_group(0)
-        .spawn();
+        .stderr(log_err);
+    spawn_tracked(
+        cmd,
+        LaunchInfo {
+            log_path: log_path.to_path_buf(),
+            log_offset,
+            appid: target.appid,
+            compatdata_dir: target.compatdata_dir.clone(),
+            proton_dir: target.proton_dir.clone(),
+        },
+    )
+    .with_context(|| format!("spawning {}", proton.display()))
+}
 
-    let child = match spawn_result {
+/// What `launch_trainer` remembers about a launch, so a trainer that dies
+/// right after starting can be diagnosed later.
+struct LaunchInfo {
+    log_path: PathBuf,
+    log_offset: u64,
+    appid: u32,
+    compatdata_dir: PathBuf,
+    proton_dir: PathBuf,
+}
+
+/// A tracked launch, keyed by its process group id (= the leader's pid).
+///
+/// `leader` is the spawned process, deliberately left unreaped (its exit is
+/// only observed with `WNOWAIT`) until the launch is released. While it is a
+/// zombie the kernel can't hand its pid to a new process, so no new process
+/// group can take that number either: as long as the record exists, the
+/// pgid can only mean this trainer's group, and signalling it can never hit
+/// an unrelated group that happens to reuse the number.
+struct LaunchRecord {
+    started: std::time::Instant,
+    info: LaunchInfo,
+    leader: Option<std::process::Child>,
+    /// Set by `stop_trainer`: a trainer the user stopped is not a failed launch.
+    stopping: bool,
+}
+
+static LAUNCHES: LazyLock<Mutex<HashMap<u32, LaunchRecord>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn launches() -> std::sync::MutexGuard<'static, HashMap<u32, LaunchRecord>> {
+    LAUNCHES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Spawns `cmd` as the leader of a new process group and tracks it (see
+/// `LaunchRecord`). Returns the process group id.
+fn spawn_tracked(mut cmd: std::process::Command, info: LaunchInfo) -> Result<u32> {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    let child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             crate::applog::log(&format!("launch_trainer: spawn failed: {e}"));
-            return Err(e).with_context(|| format!("spawning {}", proton.display()));
+            return Err(e.into());
         }
     };
     let pid = child.id();
     crate::applog::log(&format!("launch_trainer: spawned pid {pid}"));
-    if let Ok(mut launches) = LAUNCHES.lock() {
-        launches.insert(
-            pid,
-            LaunchRecord {
-                started: std::time::Instant::now(),
-                log_path: log_path.to_path_buf(),
-                log_offset,
-                appid: target.appid,
-                compatdata_dir: target.compatdata_dir.clone(),
-                proton_dir: target.proton_dir.clone(),
-            },
-        );
-    }
+    launches().insert(
+        pid,
+        LaunchRecord {
+            started: std::time::Instant::now(),
+            info,
+            leader: Some(child),
+            stopping: false,
+        },
+    );
 
     // Report back to the caller immediately (the toast shouldn't wait on
     // this) but keep watching in the background: FLiNG trainers unpack
     // themselves and relaunch, so this initial process exiting quickly is
     // normal — logged as information, not an error — but the exit status
-    // and anything it wrote to log_path (captured above) are the only
-    // window we get into a Proton/wine-level failure our own code can't see.
-    //
-    // This thread also owns reaping: nothing else in the app ever calls
-    // wait()/try_wait() on this Child, so if it stopped polling once the
-    // quick-exit window passed, a process that later exits (on its own, or
-    // via stop_trainer's SIGKILL — confirmed live) would sit as a zombie
-    // for the rest of the app's session, since only this Child handle can
-    // reap it. Keeps polling at a slower cadence indefinitely instead.
+    // and anything it wrote to the log are the only window we get into a
+    // Proton/wine-level failure our own code can't see. The watcher only
+    // observes the exit; reaping waits for `release_launch` (see
+    // `LaunchRecord`).
     std::thread::spawn(move || {
-        let mut child = child;
-        for i in 0.. {
+        for i in 0u32.. {
             std::thread::sleep(std::time::Duration::from_millis(if i < 10 { 200 } else { 1000 }));
-            match child.try_wait() {
+            // Checked under the lock that `release_launch` takes, so the pid
+            // can't be reaped (and reused) between the check and the peek.
+            let peek = {
+                let l = launches();
+                if !l.contains_key(&pid) {
+                    return;
+                }
+                peek_exit(pid)
+            };
+            match peek {
                 Ok(Some(status)) => {
                     if i < 10 {
                         crate::applog::log(&format!(
@@ -537,10 +583,9 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
                     if i == 9 {
                         crate::applog::log(&format!("launch_trainer: pid {pid} still running after 2s"));
                     }
-                    continue;
                 }
                 Err(e) => {
-                    crate::applog::log(&format!("launch_trainer: try_wait error for pid {pid}: {e}"));
+                    crate::applog::log(&format!("launch_trainer: waitid error for pid {pid}: {e}"));
                     return;
                 }
             }
@@ -550,19 +595,67 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     Ok(pid)
 }
 
-/// What `launch_trainer` remembers about a launch, keyed by its process group
-/// id, so a trainer that dies right after starting can be diagnosed later.
-struct LaunchRecord {
-    started: std::time::Instant,
-    log_path: PathBuf,
-    log_offset: u64,
-    appid: u32,
-    compatdata_dir: PathBuf,
-    proton_dir: PathBuf,
+/// The exit status of our child `pid` if it has exited, without reaping it.
+fn peek_exit(pid: u32) -> std::io::Result<Option<String>> {
+    // SAFETY: waitid only writes into the zeroed siginfo_t it is given.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: filled in by a successful waitid for a child-state change.
+    let (child, status) = unsafe { (info.si_pid(), info.si_status()) };
+    if child == 0 {
+        return Ok(None);
+    }
+    Ok(Some(if info.si_code == libc::CLD_EXITED {
+        format!("exit status: {status}")
+    } else {
+        format!("signal: {status}")
+    }))
 }
 
-static LAUNCHES: LazyLock<Mutex<HashMap<u32, LaunchRecord>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Stops tracking a launch and reaps its leader, which frees the pgid number
+/// for reuse — so only once the group is gone (or has been killed).
+fn release_launch(pgid: u32) -> Option<LaunchRecord> {
+    let mut rec = launches().remove(&pgid)?;
+    if let Some(mut leader) = rec.leader.take() {
+        match leader.try_wait() {
+            Ok(Some(_)) => {}
+            // The leader left its own group and is still running: reap it
+            // whenever it does exit, without blocking the caller.
+            _ => {
+                std::thread::spawn(move || {
+                    let _ = leader.wait();
+                });
+            }
+        }
+    }
+    Some(rec)
+}
+
+/// Sends `signal` to a tracked launch's process group. Never signals a pgid
+/// that isn't a current launch of this app: the check and the kill happen
+/// under the same lock `release_launch` takes, so the number can't be
+/// released and reused in between.
+fn signal_launch(pgid: u32, signal: libc::c_int) -> std::io::Result<bool> {
+    let l = launches();
+    if !l.contains_key(&pgid) || pgid < 2 {
+        return Ok(false);
+    }
+    // SAFETY: plain syscall; a negative pid addresses the process group.
+    if unsafe { libc::kill(-(pgid as libc::pid_t), signal) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(true)
+}
 
 /// A trainer whose whole process group is gone this soon after launch is
 /// treated as a failed launch (a healthy trainer stays up until closed).
@@ -632,20 +725,22 @@ fn read_output_tail(path: &Path, offset: u64) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-/// Called once a tracked trainer's whole process group has exited. If that
-/// happened within `EARLY_EXIT_SECS` of launch and a likely cause is found,
-/// records it as the last failure and returns it (one cause per line).
-/// Reads /proc and the prefix, so call via `spawn_blocking`.
-pub fn check_early_exit(pgid: u32) -> Option<String> {
-    let rec = LAUNCHES.lock().ok()?.remove(&pgid)?;
+/// Called once a tracked trainer's whole process group has exited: stops
+/// tracking it (see `release_launch`). If that happened within
+/// `EARLY_EXIT_SECS` of launch, the user didn't stop it, and a likely cause
+/// is found, records it as the last failure and returns it (one cause per
+/// line). Reads /proc and the prefix, so call via `spawn_blocking`.
+pub fn finish_launch(pgid: u32) -> Option<String> {
+    let rec = release_launch(pgid)?;
     let age = rec.started.elapsed().as_secs();
-    if age >= EARLY_EXIT_SECS {
+    if rec.stopping || age >= EARLY_EXIT_SECS {
         return None;
     }
+    let rec_appid = rec.info.appid;
     crate::applog::log(&format!(
-        "check_early_exit: pgid {pgid} (AppId {}) gone {age}s after launch",
-        rec.appid
+        "finish_launch: pgid {pgid} (AppId {rec_appid}) gone {age}s after launch"
     ));
+    let rec = rec.info;
 
     let output = read_output_tail(&rec.log_path, rec.log_offset);
     let dotnet = dotnet_status(&rec.compatdata_dir.join("pfx"));
@@ -658,7 +753,7 @@ pub fn check_early_exit(pgid: u32) -> Option<String> {
         output: &output,
     });
     if causes.is_empty() {
-        crate::applog::log("check_early_exit: no obvious cause found");
+        crate::applog::log("finish_launch: no obvious cause found");
         return None;
     }
     let text = causes.join("\n");
@@ -771,37 +866,44 @@ pub fn process_group_alive(pgid: u32) -> bool {
 /// Stop a trainer launched via `launch_trainer`: SIGTERM the whole process
 /// group first (not just the tracked pid — a lone `kill <pid>` would miss
 /// the relaunched trainer process; see `launch_trainer`'s doc comment),
-/// then SIGKILL after a ~2s grace period if it hasn't exited. Blocks for up
-/// to that grace period — call via `spawn_blocking`, not on the GTK thread.
+/// then SIGKILL after a ~2s grace period if it hasn't exited. Only a group
+/// this app launched and still tracks is ever signalled (see
+/// `LaunchRecord`). Blocks for up to that grace period — call via
+/// `spawn_blocking`, not on the GTK thread.
 pub fn stop_trainer(pgid: u32) {
-    // A trainer the user stopped is not a failed launch.
-    if let Ok(mut launches) = LAUNCHES.lock() {
-        launches.remove(&pgid);
+    match launches().get_mut(&pgid) {
+        Some(rec) => rec.stopping = true,
+        None => {
+            crate::applog::log(&format!(
+                "stop_trainer: pgid {pgid} is not a running launch of this app; not signalling it"
+            ));
+            return;
+        }
     }
-    crate::applog::log(&format!("stop_trainer: SIGTERM -{pgid}"));
-    let s = std::process::Command::new("kill").arg("-TERM").arg(format!("-{pgid}")).status();
-    crate::applog::log(&format!("stop_trainer: kill -TERM -{pgid} -> {s:?}"));
+    let r = signal_launch(pgid, libc::SIGTERM);
+    crate::applog::log(&format!("stop_trainer: SIGTERM -{pgid} -> {r:?}"));
 
     // Same grace window as the post-launch quick-exit check above.
     for _ in 0..10 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         if !process_group_alive(pgid) {
             crate::applog::log(&format!("stop_trainer: pgid {pgid} exited after SIGTERM"));
+            release_launch(pgid);
             return;
         }
     }
 
     crate::applog::log(&format!("stop_trainer: pgid {pgid} still alive after 2s, sending SIGKILL"));
-    let s = std::process::Command::new("kill").arg("-KILL").arg(format!("-{pgid}")).status();
-    crate::applog::log(&format!("stop_trainer: kill -KILL -{pgid} -> {s:?}"));
+    let r = signal_launch(pgid, libc::SIGKILL);
+    crate::applog::log(&format!("stop_trainer: SIGKILL -{pgid} -> {r:?}"));
 
     // Deliberately not waiting to confirm SIGKILL took effect: observed live
     // against a real wine/proton tree that full cleanup can take anywhere
     // from under a second to several seconds under load, with no reliable
-    // upper bound worth blocking the caller on here. The 1s periodic poll
-    // in ui.rs (see process_group_alive) is what actually converges the
-    // running badge to "gone" once /proc reflects it, however long that
-    // takes — this function's job is just to have sent the signals.
+    // upper bound worth blocking the caller on here. Releasing now is safe:
+    // the killed members still hold the pgid number until they are gone, so
+    // it can't be reused while any of them is alive.
+    release_launch(pgid);
 }
 
 /// The system32/syswow64 files a copied runtime tree depends on: the CLR's own
@@ -1335,6 +1437,78 @@ mod tests {
         // Online with no anti-cheat, or neither: no warning.
         assert!(!should_warn_anticheat(false, false, Some(true)));
         assert!(!should_warn_anticheat(false, false, None));
+    }
+
+    fn info() -> LaunchInfo {
+        LaunchInfo {
+            log_path: PathBuf::from("/dev/null"),
+            log_offset: 0,
+            appid: 0,
+            compatdata_dir: PathBuf::from("/nonexistent"),
+            proton_dir: PathBuf::from("/nonexistent"),
+        }
+    }
+
+    fn proc_state(pid: u32) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        Some(stat.rsplit_once(')')?.1.split_whitespace().next()?.to_string())
+    }
+
+    #[test]
+    fn an_exited_leader_holds_its_pid_until_the_launch_is_finished() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exit 3"]);
+        let pgid = spawn_tracked(cmd, info()).unwrap();
+        let mut zombie = false;
+        for _ in 0..50 {
+            if proc_state(pgid).as_deref() == Some("Z") {
+                zombie = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(zombie, "the exited leader stays unreaped, holding pid {pgid}");
+        assert!(!process_group_alive(pgid));
+        assert_eq!(peek_exit(pgid).unwrap().as_deref(), Some("exit status: 3"));
+
+        // Gone right after launch, with no game running: diagnosed as such.
+        let diagnosis = finish_launch(pgid).expect("an early exit is diagnosed");
+        assert!(diagnosis.starts_with("The game is no longer running."), "{diagnosis}");
+        assert_eq!(proc_state(pgid), None, "reaped once finished");
+        assert!(!launches().contains_key(&pgid));
+    }
+
+    #[test]
+    fn stop_signals_only_a_tracked_group() {
+        use std::os::unix::process::CommandExt;
+        // Not launched through the tracker: Stop must leave it alone.
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let stranger_pgid = stranger.id();
+        stop_trainer(stranger_pgid);
+        assert!(stranger.try_wait().unwrap().is_none(), "an untracked group was signalled");
+        assert!(!signal_launch(stranger_pgid, libc::SIGTERM).unwrap());
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
+
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let pgid = spawn_tracked(cmd, info()).unwrap();
+        assert!(process_group_alive(pgid));
+        stop_trainer(pgid);
+        assert!(!launches().contains_key(&pgid), "released after the stop");
+        let mut gone = false;
+        for _ in 0..50 {
+            if proc_state(pgid).is_none() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(gone, "the tracked trainer was stopped and reaped");
     }
 
     /// Live end-to-end check against a real running game + trainer (GTA San

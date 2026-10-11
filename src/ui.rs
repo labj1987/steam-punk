@@ -346,8 +346,8 @@ pub fn build_ui(app: &Application) {
                             .into_iter()
                             .filter(|(_, pgid)| !launcher::process_group_alive(*pgid))
                             // A trainer gone right after launch gets a
-                            // diagnosis (see launcher::check_early_exit).
-                            .map(|(path, pgid)| (path, pgid, launcher::check_early_exit(pgid)))
+                            // diagnosis (see launcher::finish_launch).
+                            .map(|(path, pgid)| (path, pgid, launcher::finish_launch(pgid)))
                             .collect::<Vec<_>>()
                     })
                     .await
