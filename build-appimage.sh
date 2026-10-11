@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # build-appimage.sh — build the Steam Punk AppImage.
 # Run from the repo root on Ubuntu (the GitHub Actions runner), as an ordinary user: it writes
-# only inside the checkout. Only its from-scratch dependency install below needs root.
+# only inside the checkout. Only its from-scratch dependency install below needs root, which it
+# gets through sudo.
 set -euo pipefail
 
 APP="steam-punk"
@@ -20,8 +21,12 @@ if ! command -v cargo >/dev/null 2>&1 || ! pkg-config --exists gtk4 2>/dev/null;
     # Google Chrome source) failing to refresh -- apt falls back to its cached index
     # for that repo and still refreshes everything else; only `apt-get install`
     # failing on a package we actually need should be fatal.
-    apt-get update -qq || true
-    apt-get install -y -qq cargo rustc libgtk-4-dev libadwaita-1-dev \
+    SUDO=()
+    if [[ $EUID -ne 0 ]]; then
+        SUDO=(sudo)
+    fi
+    "${SUDO[@]}" apt-get update -qq || true
+    "${SUDO[@]}" apt-get install -y -qq cargo rustc libgtk-4-dev libadwaita-1-dev \
         pkg-config zsync wget file desktop-file-utils
 fi
 # On a machine that already has the toolchain (CI: the workflow installs the packaging
@@ -43,7 +48,9 @@ mkdir -p "$APPDIR/usr/bin" \
          "$APPDIR/usr/share/polkit-1/actions" \
          "$APPDIR/usr/share/metainfo"
 
-cp "target/release/$APP"                              "$APPDIR/usr/bin/"
+# Cargo builds into CARGO_TARGET_DIR when it is set (e.g. a target dir shared by several
+# checkouts), else into target/.
+cp "${CARGO_TARGET_DIR:-target}/release/$APP"         "$APPDIR/usr/bin/"
 cp scripts/privileged-setup.sh                        "$APPDIR/usr/lib/$APP/"
 chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"

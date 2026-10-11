@@ -4,13 +4,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs these same checks before it builds anything.
+  workflow_call:
 
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes a run still going. When the release workflow
+# calls this, github.workflow is the release's name, so the group differs from the release's own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       # Every action is pinned to a full commit SHA: a tag such as `v3` can be moved to other
       # code, a SHA cannot. The trailing comment names the release the SHA is; Dependabot
@@ -37,6 +46,7 @@ jobs:
 
   scripts:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,4 +54,4 @@ jobs:
       - name: ShellCheck
         run: shellcheck -S warning build-appimage.sh scripts/*.sh
       - name: AppStream releases match the changelog
-        run: python3 scripts/sync_appdata_releases.py --check && python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)" > /dev/null
+        run: python3 scripts/sync_appdata_releases.py --self-test && python3 scripts/sync_appdata_releases.py --check && python3 scripts/release_notes.py --self-test && python3 scripts/release_notes.py "$(grep -m1 '^version' Cargo.toml | cut -d\" -f2)" > /dev/null
