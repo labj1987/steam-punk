@@ -51,10 +51,14 @@ and the full log is at `~/.local/share/steam-punk/steam-punk.log`.
 If the game's prefix doesn't have a real .NET Framework 4.6.2 or newer yet
 (required by current WPF-based trainers, and never provided by Proton's
 bundled wine-mono), the app offers a one-time setup. It first tries to copy a
-working runtime from another game's Proton prefix, and otherwise installs
-`dotnet48` with `winetricks` (system packages via a one-time password prompt on
-Debian/Ubuntu; the manual commands are shown elsewhere). This modifies the
-game's Wine prefix: it installs the .NET runtimes and imports a `.reg` file.
+working runtime from another game's Proton prefix in any of your Steam
+libraries, which works with the game running. Otherwise it installs `dotnet48`
+with `winetricks`, run with the game's own Proton wine. That installer needs the
+game closed: the app asks you to quit the game, installs, then tells you to
+start the game again and launch the trainer. winetricks and cabextract are
+installed through a one-time password prompt on Debian/Ubuntu; elsewhere the
+manual commands are shown. This modifies the game's Wine prefix: it installs the
+.NET runtimes and imports a `.reg` file.
 
 ## Requirements
 

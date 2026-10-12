@@ -23,6 +23,12 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
 - Steam Punk no longer asks for your password when it starts. It only asks when you choose the
   automatic setup and system packages are missing, once.
 - The manual setup commands now match exactly what the automatic setup runs.
+- Games running on Proton 8 or older are now recognised, and the setup uses the right wine
+  libraries for each Proton version.
+- Games from the Flatpak version of Steam are now supported: trainers and the setup run inside
+  Steam's sandbox, where the game's Wine session is.
+- A setup step that hangs is now stopped after a time limit, with a message saying which step
+  it was, instead of waiting forever.
 - Opening Steam Punk again while it is already running no longer clears the running copy's log,
   so the diagnosis of a trainer that failed to start keeps working.
 - Closing the Steam AppID dialog with Escape now counts as Skip, so the rest of a multi-file

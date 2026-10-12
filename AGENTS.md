@@ -20,7 +20,27 @@ the game's own compatdata, so the trainer's wine client joins the game's
 existing wineserver (whose socket lives under `/tmp`, shared with the host)
 instead of starting its own. The Proton build to use is detected from the
 actual running `wineserver` process, not from `compatdata`'s `config_info`,
-which has been observed stale.
+which has been observed stale. Proton builds keep their wine under `files/`
+(Proton 9 and later) or `dist/` (Proton 8 and older); both are recognised.
+
+Every Proton command for a running game goes through
+`launcher::proton_command`. Under Flatpak Steam the game's wineserver runs in
+the Steam sandbox, whose `/tmp` is private, so a host-side `proton` can't
+reach it and would start a second wineserver on the prefix. When the game's
+wineserver is in a Flatpak sandbox (`/proc/<pid>/root/.flatpak-info`
+exists), the command runs as `flatpak enter <wineserver pid> env
+STEAM_COMPAT_…=… <proton> …`, which joins that process's namespaces and
+environment. Verified with a Flatpak app on a native system: env passing,
+the private `/tmp`, and that the entered processes stay in the host process
+group of `flatpak enter` (so trainer tracking and Stop work). Not verified
+against a real Flatpak Steam game. The game's Steam install (native or
+Flatpak) is the one whose library holds its compatdata.
+
+Proton commands the app waits on have timeouts (`launcher::run_with_timeout`
+kills the command's process group): registry read/import 90 s, winetricks
+60 min, the installer's wineserver exit 2 min; after a winetricks timeout
+the prefix's wine is stopped with Proton's `wineserver -k` (the game is
+closed then, so it is all the installer's).
 
 A launched trainer is tracked by its process group id, and the group's
 leader is deliberately left unreaped (its exit is observed with `WNOWAIT`)
@@ -54,7 +74,8 @@ error, and saving an AppID fails instead of wiping the file.
   packages need root, the winetricks install itself only touches the
   user-owned wine prefix and needs no privilege escalation.
 - `applog.rs` — single per-session log covering launches, setup steps, and
-  user actions, at `~/.local/share/steam-punk/steam-punk.log`. Only the
+  user actions, at `~/.local/share/steam-punk/steam-punk.log` (unit tests
+  log to stderr instead, never to a file). Only the
   primary instance starts (truncates) it, from GApplication `startup`: a
   second launch forwards to the running instance and must not wipe its log,
   whose byte offsets the launch diagnosis reads trainer output back from.
@@ -93,7 +114,10 @@ between steps, which waits for every process in the prefix, so the user is
 asked to quit the game first and the app waits for its wineserver to go.
 winetricks is run with the game's own Proton wine (`launcher::ProtonWine`:
 `WINE`, `WINELOADER`, `WINESERVER`, `WINEDLLPATH`, `LD_LIBRARY_PATH`, `PATH`
-as Proton's own `init_wine` sets them), never the system wine, which is a
+as that Proton version's own `init_wine` sets them — `lib64`+`lib` for
+Proton 9 and the `dist/` builds, per-triplet `lib/<arch>-linux-gnu` plus
+`lib/vkd3d` for Proton 10+ and GE; check a new layout's `init_wine` before
+changing this), never the system wine, which is a
 different wine build than the one that made the prefix. The system packages
 are therefore only winetricks and cabextract (no `wine32:i386`). `winetricks
 -f dotnet48` is used with `-f` (force) because winetricks marks a verb done
@@ -135,16 +159,22 @@ checkout:
    script stops early if `wget`, `file` or `desktop-file-validate` is missing.
 2. `cargo build --release --locked`. Rust is pinned in `rust-toolchain.toml`;
    bump it there and in both workflows together (each checks it).
-3. Assembles the AppDir (binary, privileged script, polkit policy, appdata,
-   desktop file, icon, generated `AppRun`) and runs `desktop-file-validate`
-   on the copied desktop file (fatal). `AppRun` only starts the app; it asks
-   for no password. The privileged script and policy must sit at fixed
-   system paths for polkit, and `setup::run_system_setup` installs them,
-   only when the user starts the automatic setup and the system copies are
-   missing or differ: one pkexec call runs `scripts/install-privileged.sh`
-   (compiled into the binary), which installs both checksum-verified and
-   then runs the setup script. When they are current, pkexec runs the
-   script directly and polkit shows the policy's own message.
+3. Assembles the AppDir (binary, appdata, desktop file, icon, generated
+   `AppRun`) and runs `desktop-file-validate` on the copied desktop file
+   (fatal). `AppRun` only starts the app; it asks for no password. The
+   privileged script and polkit policy are compiled into the binary
+   (`include_bytes!`), with their SHA-256 pinned at build time by `build.rs`,
+   not shipped as files (an extracted AppDir is user-writable). They must sit
+   at fixed system paths for polkit, and `setup::run_system_setup` installs
+   them only when the user starts the automatic setup and the system copies
+   are missing or differ: one pkexec call runs `scripts/install-privileged.sh`
+   (also compiled in), which copies the user-staged files into root-owned
+   temp files, checks the pinned sums, installs both and runs the setup
+   script. That one prompt is pkexec's generic one for `/bin/bash`: polkit
+   can only show the policy's message once the policy is installed. When
+   the system copies are current, pkexec runs the script directly and
+   polkit shows the policy's own message. `APT_INSTALL` in setup.rs and the
+   script's install line are held together by a unit test.
 4. Downloads `appimagetool` (pinned to 1.9.1 and verified against a SHA-256
    checksum in the script, cached in `.cache/`) and packs the AppDir into
    `steam-punk-$VERSION-x86_64.AppImage`, with `UPDATE_INFORMATION` set for
