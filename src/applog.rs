@@ -14,13 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-/// Unit tests log to a throwaway file, never the user's real log.
-#[cfg(test)]
-pub fn log_path() -> PathBuf {
-    std::env::temp_dir().join(format!("steam-punk-test-{}.log", std::process::id()))
-}
-
-#[cfg(not(test))]
 pub fn log_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".local/share/steam-punk/steam-punk.log")
@@ -43,12 +36,20 @@ pub fn init() {
     ));
 }
 
+/// Appends a timestamped line to the log. Unit tests never write the user's
+/// log (or leave log files behind): their lines go to stderr, which the test
+/// harness shows for a failing test.
 pub fn log(msg: &str) {
+    let line = format!("[{}] {msg}", timestamp());
+    if cfg!(test) {
+        eprintln!("{line}");
+        return;
+    }
     let _guard = LOCK.lock().unwrap();
     let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path()) else {
         return;
     };
-    let _ = writeln!(f, "[{}] {msg}", timestamp());
+    let _ = writeln!(f, "{line}");
 }
 
 fn unix_now() -> i64 {

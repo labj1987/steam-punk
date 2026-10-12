@@ -10,6 +10,23 @@ pub struct LaunchTarget {
     pub client_dir: PathBuf,
     pub compatdata_dir: PathBuf,
     pub proton_dir: PathBuf,
+    /// Set when the game runs inside a Flatpak sandbox (Flatpak Steam).
+    pub sandbox: Option<Sandbox>,
+}
+
+/// The Flatpak sandbox the game's wineserver runs in. Flatpak gives every
+/// sandbox a private /tmp, and wine finds a prefix's wineserver through a
+/// socket under /tmp, so a Proton command run on the host can't reach the
+/// game's wineserver: it would start a second one on the same prefix. Such
+/// commands are run inside the sandbox instead, with `flatpak enter <pid>`
+/// on the wineserver's own pid, which joins its namespaces (/tmp included)
+/// and its environment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sandbox {
+    pub pid: u32,
+    /// The game's STEAM_COMPAT_CLIENT_INSTALL_PATH as seen inside the
+    /// sandbox, from the wineserver's environment.
+    pub client_install_path: Option<String>,
 }
 
 impl LaunchTarget {
@@ -100,20 +117,28 @@ pub fn running_games() -> Vec<RunningGame> {
     games
 }
 
-/// Resolve `<proton_dir>` from the currently running wineserver whose
-/// STEAM_COMPAT_DATA_PATH matches this game's compatdata dir. This is the
-/// source of truth — config_info can be stale (observed: pointing at a
-/// different Proton build than the one actually running).
-fn find_proton_dir_from_wineserver(compatdata_dir: &Path) -> Option<PathBuf> {
+/// The game's running wineserver: the one whose STEAM_COMPAT_DATA_PATH is
+/// this game's compatdata dir.
+struct GameServer {
+    pid: u32,
+    /// From the server's executable; None for an unrecognised layout.
+    proton_dir: Option<PathBuf>,
+    /// The server's STEAM_COMPAT_CLIENT_INSTALL_PATH, if set.
+    client_install_path: Option<String>,
+}
+
+/// Find the game's wineserver. Its Proton build is the source of truth —
+/// config_info can be stale (observed: pointing at a different Proton build
+/// than the one actually running).
+fn find_game_wineserver(compatdata_dir: &Path) -> Option<GameServer> {
     let target = normalize_lexical(compatdata_dir);
     let entries = std::fs::read_dir("/proc").ok()?;
 
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
-        }
-        let exe_link = entry.path().join("exe");
-        let Ok(exe_target) = std::fs::read_link(&exe_link) else {
+        };
+        let Ok(exe_target) = std::fs::read_link(entry.path().join("exe")) else {
             continue;
         };
         let normalized_exe = normalize_lexical(&exe_target);
@@ -124,28 +149,53 @@ fn find_proton_dir_from_wineserver(compatdata_dir: &Path) -> Option<PathBuf> {
         let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
             continue;
         };
-        let matches_prefix = environ
+        let vars: Vec<&str> = environ
             .split(|&b| b == 0)
             .filter_map(|s| std::str::from_utf8(s).ok())
+            .collect();
+        let matches_prefix = vars
+            .iter()
             .filter_map(|kv| kv.strip_prefix("STEAM_COMPAT_DATA_PATH="))
             .any(|v| normalize_lexical(Path::new(v)) == target);
-
         if matches_prefix {
-            if let Some(proton_dir) = proton_dir_from_wineserver_exe(&normalized_exe) {
-                return Some(proton_dir);
-            }
+            return Some(GameServer {
+                pid,
+                proton_dir: proton_dir_from_wineserver_exe(&normalized_exe),
+                client_install_path: vars
+                    .iter()
+                    .find_map(|kv| kv.strip_prefix("STEAM_COMPAT_CLIENT_INSTALL_PATH="))
+                    .map(str::to_string),
+            });
         }
     }
     None
 }
 
-/// `<proton_dir>/files/bin/wineserver` -> `<proton_dir>`, after the path has
-/// already been lexically normalized (Proton's own libwine loader constructs
-/// this path with `../..` components, e.g. `files/lib/wine/../../bin/wineserver`).
+fn find_proton_dir_from_wineserver(compatdata_dir: &Path) -> Option<PathBuf> {
+    find_game_wineserver(compatdata_dir)?.proton_dir
+}
+
+/// True when `pid` runs inside a Flatpak sandbox: Flatpak puts
+/// `/.flatpak-info` in every sandbox's root.
+fn in_flatpak_sandbox(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}/root/.flatpak-info")).is_file()
+}
+
+/// `<proton_dir>/files/bin/wineserver` -> `<proton_dir>` (or `dist/` for
+/// Proton 8 and older), after the path has already been lexically
+/// normalized (Proton's own libwine loader constructs this path with `../..`
+/// components, e.g. `files/lib/wine/../../bin/wineserver`).
 fn proton_dir_from_wineserver_exe(normalized_exe: &Path) -> Option<PathBuf> {
     let s = normalized_exe.to_string_lossy();
-    s.strip_suffix("/files/bin/wineserver").map(PathBuf::from)
+    PROTON_DIST_DIRS
+        .iter()
+        .find_map(|d| s.strip_suffix(&format!("/{d}/bin/wineserver")))
+        .map(PathBuf::from)
 }
+
+/// The directory a Proton build keeps its wine in: `files/` since Proton 9,
+/// `dist/` before.
+const PROTON_DIST_DIRS: [&str; 2] = ["files", "dist"];
 
 /// Resolve `..`/`.` components without touching the filesystem (no
 /// canonicalize — components may not all exist, and we don't want symlink
@@ -171,22 +221,20 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 /// `/mnt/ProtonDrive/...` or usernames containing it. Never split on
 /// whitespace — Proton directory names contain spaces ("Proton - Experimental").
 fn proton_dir_from_config_line(line: &str) -> Option<PathBuf> {
-    let (dir, _) = line.split_once("/files/")?;
-    if dir.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(dir))
-    }
+    // The last marker wins: the line is `<proton_dir>/<files|dist>/share/…`,
+    // so a library path that merely contains "/dist/" or "/files/" further up
+    // can't be mistaken for it.
+    let dir = PROTON_DIST_DIRS
+        .iter()
+        .filter_map(|d| line.rfind(&format!("/{d}/")))
+        .max()
+        .map(|at| &line[..at])?;
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
 fn find_proton_dir_from_config_info(compatdata_dir: &Path) -> Option<PathBuf> {
     let contents = std::fs::read_to_string(compatdata_dir.join("config_info")).ok()?;
     proton_dir_from_config_line(contents.lines().nth(1)?)
-}
-
-fn find_proton_dir(compatdata_dir: &Path) -> Option<PathBuf> {
-    find_proton_dir_from_wineserver(compatdata_dir)
-        .or_else(|| find_proton_dir_from_config_info(compatdata_dir))
 }
 
 /// Resolve everything needed to launch against a specific running game: its
@@ -196,32 +244,105 @@ fn find_proton_dir(compatdata_dir: &Path) -> Option<PathBuf> {
 pub fn resolve_launch_target(appid: u32) -> Result<LaunchTarget> {
     crate::applog::log(&format!("resolve_launch_target: AppId {appid}"));
 
-    let client_dir = steam::steam_client_dir();
-    crate::applog::log(&format!("resolve_launch_target: steam_client_dir -> {client_dir:?}"));
-    let client_dir =
-        client_dir.ok_or_else(|| anyhow!("Could not find a Steam installation."))?;
-
-    let libraries = steam::library_folders(&client_dir);
-    let compatdata_dir = steam::compatdata_dir(&libraries, &appid.to_string());
+    // Every Steam install (native and Flatpak) is searched: the game's
+    // compatdata is in one of their libraries. If more than one has it, the
+    // one whose wineserver is running is the game's.
+    let roots = steam::metadata_roots();
+    crate::applog::log(&format!("resolve_launch_target: Steam installs -> {roots:?}"));
+    if roots.is_empty() {
+        return Err(anyhow!("Could not find a Steam installation."));
+    }
+    let candidates: Vec<(PathBuf, PathBuf)> = roots
+        .iter()
+        .filter_map(|root| {
+            let libraries = steam::library_folders(root);
+            steam::compatdata_dir(&libraries, &appid.to_string()).map(|c| (root.clone(), c))
+        })
+        .collect();
     crate::applog::log(&format!(
-        "resolve_launch_target: compatdata_dir for AppId {appid} -> {compatdata_dir:?} (searched {} libraries)",
-        libraries.len()
+        "resolve_launch_target: compatdata for AppId {appid} -> {candidates:?}"
     ));
-    let compatdata_dir = compatdata_dir
+    let mut server = None;
+    let mut chosen = None;
+    for (root, compat) in &candidates {
+        if let Some(s) = find_game_wineserver(compat) {
+            server = Some(s);
+            chosen = Some((root.clone(), compat.clone()));
+            break;
+        }
+    }
+    let (client_dir, compatdata_dir) = chosen
+        .or_else(|| candidates.first().cloned())
         .ok_or_else(|| anyhow!("Could not find compatdata for AppId {appid}."))?;
 
-    let proton_dir = find_proton_dir(&compatdata_dir);
-    crate::applog::log(&format!("resolve_launch_target: find_proton_dir -> {proton_dir:?}"));
+    let proton_dir = server
+        .as_ref()
+        .and_then(|s| s.proton_dir.clone())
+        .or_else(|| find_proton_dir_from_config_info(&compatdata_dir));
+    crate::applog::log(&format!("resolve_launch_target: proton_dir -> {proton_dir:?}"));
     let proton_dir = proton_dir.ok_or_else(|| {
         anyhow!("Could not determine which Proton build the game is currently running.")
     })?;
+
+    let sandbox = server.filter(|s| in_flatpak_sandbox(s.pid)).map(|s| Sandbox {
+        pid: s.pid,
+        client_install_path: s.client_install_path,
+    });
+    crate::applog::log(&format!("resolve_launch_target: Flatpak sandbox -> {sandbox:?}"));
 
     Ok(LaunchTarget {
         appid,
         client_dir,
         compatdata_dir,
         proton_dir,
+        sandbox,
     })
+}
+
+/// A `proton <verb> <args>` command for this game, the way Steam runs it:
+/// with STEAM_COMPAT_CLIENT_INSTALL_PATH and STEAM_COMPAT_DATA_PATH set. For
+/// a game in a Flatpak sandbox it runs inside that sandbox (see `Sandbox`):
+/// `flatpak enter <pid> env VAR=… <proton> …`. Processes started this way
+/// stay in the host process group of the `flatpak enter` process, so the
+/// group tracking and Stop work the same (verified with a Flatpak app).
+/// `unset` names variables removed from the command's environment.
+pub fn proton_command<I, S>(target: &LaunchTarget, args: I, unset: &[&str]) -> std::process::Command
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let proton = target.proton_dir.join("proton");
+    match &target.sandbox {
+        None => {
+            let mut cmd = std::process::Command::new(&proton);
+            cmd.args(args)
+                .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
+                .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir);
+            for var in unset {
+                cmd.env_remove(var);
+            }
+            cmd
+        }
+        Some(sandbox) => {
+            let client = sandbox
+                .client_install_path
+                .clone()
+                .unwrap_or_else(|| target.client_dir.to_string_lossy().into_owned());
+            let mut cmd = std::process::Command::new("flatpak");
+            cmd.arg("enter").arg(sandbox.pid.to_string()).arg("env");
+            for var in unset {
+                cmd.arg("-u").arg(var);
+            }
+            cmd.arg(format!("STEAM_COMPAT_CLIENT_INSTALL_PATH={client}"))
+                .arg(format!(
+                    "STEAM_COMPAT_DATA_PATH={}",
+                    target.compatdata_dir.to_string_lossy()
+                ))
+                .arg(&proton)
+                .args(args);
+            cmd
+        }
+    }
 }
 
 /// The literal ASCII marker Wine embeds in the DOS-stub area of any DLL it
@@ -406,6 +527,92 @@ pub fn prefix_health(target: &LaunchTarget) -> (bool, String) {
     (usable, s.summary())
 }
 
+/// How long a registry read or import through Proton may take. Proton's
+/// own startup is a second or two; anything near this means a wine process
+/// is stuck.
+const REG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Runs `cmd` to completion, capturing its output, but gives up after
+/// `timeout`: then every process it started in its process group (its own
+/// group, so nothing else is hit) is killed and reaped, and the error names
+/// `what`. Processes that left the group (a wineserver daemonizes into its
+/// own session) are the caller's to stop. stdin is /dev/null.
+pub fn run_with_timeout(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+    what: &str,
+) -> Result<std::process::Output> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("{what}: could not start {:?}", cmd.get_program()))?;
+    let pgid = child.id();
+    // Drained on threads so a chatty process can't block on a full pipe.
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out_t = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err_t = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            // SAFETY: plain syscall on the group this function created; the
+            // unreaped child keeps the number from being reused meanwhile.
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+            let _ = child.wait();
+            crate::applog::log(&format!("{what}: timed out after {}s, stopped it", timeout.as_secs()));
+            return Err(anyhow!(
+                "{what} didn't finish within {} and was stopped.",
+                human_duration(timeout)
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    // A grandchild that kept the pipes open (and left the group) must not
+    // hang us: the readers are only waited for briefly.
+    let collect = |t: std::thread::JoinHandle<Vec<u8>>| {
+        for _ in 0..50 {
+            if t.is_finished() {
+                return t.join().unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Vec::new()
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: collect(out_t),
+        stderr: collect(err_t),
+    })
+}
+
+fn human_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 120 && secs.is_multiple_of(60) {
+        format!("{} minutes", secs / 60)
+    } else {
+        format!("{secs} seconds")
+    }
+}
+
 /// The registry key holding the installed .NET 4.x `Release`.
 const NDP_V4_FULL_KEY: &str = r"HKLM\Software\Microsoft\NET Framework Setup\NDP\v4\Full";
 
@@ -414,16 +621,13 @@ const NDP_V4_FULL_KEY: &str = r"HKLM\Software\Microsoft\NET Framework Setup\NDP\
 /// it joins the game's wineserver with the game's settings). `Ok(None)` when
 /// the key or value doesn't exist.
 fn live_dotnet_release(target: &LaunchTarget) -> Result<Option<u32>> {
-    let proton = target.proton_dir.join("proton");
-    let out = std::process::Command::new(&proton)
-        .args(["runinprefix", "reg", "query", NDP_V4_FULL_KEY, "/v", "Release"])
-        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
-        .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
-        // With PROTON_LOG set, Proton sends wine's stdout to its log file.
-        .env_remove("PROTON_LOG")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("running reg query via {}", proton.display()))?;
+    // With PROTON_LOG set, Proton sends wine's stdout to its log file.
+    let cmd = proton_command(
+        target,
+        ["runinprefix", "reg", "query", NDP_V4_FULL_KEY, "/v", "Release"],
+        &["PROTON_LOG"],
+    );
+    let out = run_with_timeout(cmd, REG_TIMEOUT, "Reading the game's registry (reg query)")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     match parse_reg_query_dword(&stdout, "Release") {
         Some(v) => Ok(Some(v)),
@@ -491,7 +695,46 @@ pub enum EnvChange {
     Set(&'static str, String),
     /// Put this in front of the variable's current value (`:`-separated).
     Prepend(&'static str, String),
+    /// Put this after the variable's current value (`:`-separated).
+    Append(&'static str, String),
     Unset(&'static str),
+}
+
+/// How a Proton build lays out its wine, which decides what its `proton`
+/// script's `init_wine` puts in LD_LIBRARY_PATH and WINEDLLPATH.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProtonLayout {
+    /// Proton 10 and later, GE and other current builds: `files/` with
+    /// per-architecture `lib/<triplet>` directories and `lib/wine`.
+    Multiarch,
+    /// Proton 9 (`files/`) and Proton 8 and older (`dist/`): `lib64/` and
+    /// `lib/`, each with its own `wine/`.
+    Lib64 { dist: &'static str },
+}
+
+impl ProtonLayout {
+    /// The layout of the Proton build at `proton_dir`, or None when it has no
+    /// wine binaries in either place.
+    pub fn detect(proton_dir: &Path) -> Option<Self> {
+        PROTON_DIST_DIRS.iter().find_map(|&dist| {
+            let d = proton_dir.join(dist);
+            if !(d.join("bin/wine").is_file() && d.join("bin/wineserver").is_file()) {
+                return None;
+            }
+            Some(if d.join("lib64").is_dir() {
+                ProtonLayout::Lib64 { dist }
+            } else {
+                ProtonLayout::Multiarch
+            })
+        })
+    }
+
+    fn dist(self) -> &'static str {
+        match self {
+            ProtonLayout::Multiarch => "files",
+            ProtonLayout::Lib64 { dist } => dist,
+        }
+    }
 }
 
 /// The game's own Proton build's wine, set up the way Proton (and
@@ -500,77 +743,115 @@ pub enum EnvChange {
 /// wine build over it: a mismatched wineboot, or a "version mismatch" from
 /// the game's wineserver.
 pub struct ProtonWine {
-    files: PathBuf,
+    dist: PathBuf,
+    layout: ProtonLayout,
     prefix: PathBuf,
 }
 
 impl ProtonWine {
     pub fn for_target(target: &LaunchTarget) -> Result<Self> {
-        let files = target.proton_dir.join("files");
-        for bin in ["bin/wine", "bin/wineserver"] {
-            if !files.join(bin).is_file() {
-                return Err(anyhow!(
-                    "The game's Proton build at {} has no {bin}, so the .NET installer can't \
-                     be run with the wine that matches this prefix.",
-                    target.proton_dir.display()
-                ));
-            }
-        }
-        Ok(Self { files, prefix: target.prefix_dir() })
+        let layout = ProtonLayout::detect(&target.proton_dir).ok_or_else(|| {
+            anyhow!(
+                "The game's Proton build at {} has no wine (bin/wine and bin/wineserver under \
+                 files/ or dist/), so the .NET installer can't be run with the wine that \
+                 matches this prefix. Start the game once with this Proton build, then try again.",
+                target.proton_dir.display()
+            )
+        })?;
+        Ok(Self {
+            dist: target.proton_dir.join(layout.dist()),
+            layout,
+            prefix: target.prefix_dir(),
+        })
     }
 
     pub fn wineserver(&self) -> PathBuf {
-        self.files.join("bin/wineserver")
+        self.dist.join("bin/wineserver")
     }
 
     fn path(&self, rel: &str) -> String {
-        self.files.join(rel).to_string_lossy().into_owned()
+        self.dist.join(rel).to_string_lossy().into_owned()
     }
 
-    /// Mirrors what Proton's own script sets for its wine (`init_wine`):
-    /// its bin dir first on PATH, its unix libraries and DLL directories,
-    /// and no inherited WINEARCH.
+    /// Mirrors what this Proton build's own script sets for its wine
+    /// (`init_wine`): its bin dir first on PATH, its unix libraries in
+    /// LD_LIBRARY_PATH and its DLL directories in WINEDLLPATH — which differ
+    /// by layout — and no inherited WINEARCH.
     pub fn env(&self) -> Vec<EnvChange> {
         let wine = self.path("bin/wine");
-        vec![
+        let mut env = vec![
             EnvChange::Set("WINEPREFIX", self.prefix.to_string_lossy().into_owned()),
             EnvChange::Set("WINE", wine.clone()),
             EnvChange::Set("WINELOADER", wine),
             EnvChange::Set("WINESERVER", self.path("bin/wineserver")),
-            EnvChange::Set(
-                "WINEDLLPATH",
-                format!("{}:{}", self.path("lib/vkd3d"), self.path("lib/wine")),
-            ),
-            EnvChange::Prepend(
-                "LD_LIBRARY_PATH",
-                format!(
-                    "{}:{}",
-                    self.path("lib/x86_64-linux-gnu"),
-                    self.path("lib/i386-linux-gnu")
-                ),
-            ),
-            EnvChange::Prepend("PATH", self.path("bin")),
-            EnvChange::Unset("WINEARCH"),
-        ]
+        ];
+        match self.layout {
+            // ld_library_path = [lib/x86_64-linux-gnu, lib/aarch64-linux-gnu,
+            // lib/i386-linux-gnu]; dllpaths = [lib/vkd3d, lib/wine] plus any
+            // WINEDLLPATH already set.
+            ProtonLayout::Multiarch => {
+                env.push(EnvChange::Prepend(
+                    "LD_LIBRARY_PATH",
+                    [
+                        "lib/x86_64-linux-gnu",
+                        "lib/aarch64-linux-gnu",
+                        "lib/i386-linux-gnu",
+                    ]
+                    .map(|r| self.path(r))
+                    .join(":"),
+                ));
+                env.push(EnvChange::Set(
+                    "WINEDLLPATH",
+                    format!("{}:{}", self.path("lib/vkd3d"), self.path("lib/wine")),
+                ));
+                env.push(EnvChange::Append("WINEDLLPATH", String::new()));
+            }
+            // lib64_dir + ":" + lib_dir; lib64_dir + "/wine:" + lib_dir + "/wine".
+            ProtonLayout::Lib64 { .. } => {
+                env.push(EnvChange::Prepend(
+                    "LD_LIBRARY_PATH",
+                    format!("{}:{}", self.path("lib64"), self.path("lib")),
+                ));
+                env.push(EnvChange::Set(
+                    "WINEDLLPATH",
+                    format!("{}:{}", self.path("lib64/wine"), self.path("lib/wine")),
+                ));
+            }
+        }
+        env.push(EnvChange::Prepend("PATH", self.path("bin")));
+        env.push(EnvChange::Unset("WINEARCH"));
+        env
     }
 
     pub fn apply(&self, cmd: &mut std::process::Command) {
+        let mut set: Vec<(&'static str, String)> = Vec::new();
         for change in self.env() {
             match change {
-                EnvChange::Set(k, v) => {
-                    cmd.env(k, v);
-                }
+                EnvChange::Set(k, v) => set.push((k, v)),
                 EnvChange::Prepend(k, v) => {
                     let value = match std::env::var(k) {
                         Ok(cur) if !cur.is_empty() => format!("{v}:{cur}"),
                         _ => v,
                     };
-                    cmd.env(k, value);
+                    set.push((k, value));
+                }
+                // Appends the inherited value to what was set above.
+                EnvChange::Append(k, _) => {
+                    if let (Ok(cur), Some(entry)) =
+                        (std::env::var(k), set.iter_mut().find(|(n, _)| *n == k))
+                    {
+                        if !cur.is_empty() {
+                            entry.1 = format!("{}:{cur}", entry.1);
+                        }
+                    }
                 }
                 EnvChange::Unset(k) => {
                     cmd.env_remove(k);
                 }
             }
+        }
+        for (k, v) in set {
+            cmd.env(k, v);
         }
     }
 
@@ -578,19 +859,24 @@ impl ProtonWine {
     /// for the manual instructions.
     pub fn shell_env(&self) -> String {
         let mut unset = Vec::new();
-        let mut set = Vec::new();
+        let mut set: Vec<(&'static str, String)> = Vec::new();
         for change in self.env() {
             match change {
-                EnvChange::Set(k, v) => set.push(format!("{k}={}", shell_quote(&v))),
+                EnvChange::Set(k, v) => set.push((k, shell_quote(&v))),
                 EnvChange::Prepend(k, v) => {
-                    set.push(format!("{k}={}\"${{{k}:+:${k}}}\"", shell_quote(&v)))
+                    set.push((k, format!("{}\"${{{k}:+:${k}}}\"", shell_quote(&v))))
+                }
+                EnvChange::Append(k, _) => {
+                    if let Some(entry) = set.iter_mut().find(|(n, _)| *n == k) {
+                        entry.1 = format!("{}\"${{{k}:+:${k}}}\"", entry.1);
+                    }
                 }
                 EnvChange::Unset(k) => unset.push(format!("-u {k}")),
             }
         }
         let mut parts = vec!["env".to_string()];
         parts.extend(unset);
-        parts.extend(set);
+        parts.extend(set.into_iter().map(|(k, v)| format!("{k}={v}")));
         parts.join(" ")
     }
 }
@@ -655,7 +941,7 @@ fn log_dosdevices(target: &LaunchTarget) {
 /// own, and that `kill -TERM -<pgid>` reliably takes down the whole tree
 /// (wrapper + relaunched trainer) in one shot.
 pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Path) -> Result<u32> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -674,19 +960,9 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     let log_offset = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
 
     let proton = target.proton_dir.join("proton");
-    crate::applog::log(&format!(
-        "launch_trainer: {} runinprefix {} (STEAM_COMPAT_CLIENT_INSTALL_PATH={} STEAM_COMPAT_DATA_PATH={})",
-        proton.display(),
-        trainer_path.display(),
-        target.client_dir.display(),
-        target.compatdata_dir.display(),
-    ));
-    let mut cmd = Command::new(&proton);
-    cmd.arg("runinprefix")
-        .arg(trainer_path)
-        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
-        .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
-        .stdin(Stdio::null())
+    let mut cmd = proton_command(target, [std::ffi::OsStr::new("runinprefix"), trainer_path.as_os_str()], &[]);
+    crate::applog::log(&format!("launch_trainer: {cmd:?}"));
+    cmd.stdin(Stdio::null())
         .stdout(log_out)
         .stderr(log_err);
     spawn_tracked(
@@ -1250,22 +1526,27 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
     std::fs::write(&reg_path, dotnet_reg_export(&donor_reg))
         .with_context(|| format!("writing {}", reg_path.display()))?;
 
-    let proton = target.proton_dir.join("proton");
-    let status = std::process::Command::new(&proton)
-        .arg("runinprefix")
-        .arg("regedit")
-        .arg("/S")
-        .arg(r"C:\windows\temp\steam-punk-dotnet.reg")
-        .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
-        .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir)
-        .status();
+    let cmd = proton_command(
+        target,
+        ["runinprefix", "regedit", "/S", r"C:\windows\temp\steam-punk-dotnet.reg"],
+        &[],
+    );
+    let out = run_with_timeout(cmd, REG_TIMEOUT, "Importing the .NET registry keys (regedit)");
     // The temp .reg is only needed for the import; drop it either way.
     let _ = std::fs::remove_file(&reg_path);
-    let status = status.with_context(|| format!("running regedit via {}", proton.display()))?;
+    let out = out?;
+    let status = out.status;
 
     crate::applog::log(&format!("apply_dotnet_registry: regedit exited {status:?}"));
     if !status.success() {
-        return Err(anyhow!("regedit failed to import .NET registry keys ({status})"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        crate::applog::log(&format!("apply_dotnet_registry: regedit output: {}", stderr.trim()));
+        let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        return Err(anyhow!(
+            "regedit failed to import .NET registry keys ({status}): {}",
+            tail.join(" | ")
+        ));
     }
     Ok(())
 }
@@ -1727,38 +2008,213 @@ mod tests {
         assert_eq!(find_donor_prefix(&roots[..1], &ours), None);
     }
 
-    #[test]
-    fn proton_wine_env_points_at_the_proton_build() {
-        let s = Scratch::new("protonwine");
-        let proton = s.0.join("Proton 9.0");
-        let target = LaunchTarget {
+    /// A Proton build's wine layout, as each version ships it.
+    fn fake_proton(dir: &Path, dist: &str, lib64: bool) {
+        std::fs::create_dir_all(dir.join(dist).join("bin")).unwrap();
+        std::fs::write(dir.join(dist).join("bin/wine"), b"").unwrap();
+        std::fs::write(dir.join(dist).join("bin/wineserver"), b"").unwrap();
+        if lib64 {
+            std::fs::create_dir_all(dir.join(dist).join("lib64/wine")).unwrap();
+            std::fs::create_dir_all(dir.join(dist).join("lib/wine")).unwrap();
+        } else {
+            std::fs::create_dir_all(dir.join(dist).join("lib/x86_64-linux-gnu")).unwrap();
+            std::fs::create_dir_all(dir.join(dist).join("lib/wine")).unwrap();
+        }
+    }
+
+    fn target_for(s: &Scratch, proton: &Path) -> LaunchTarget {
+        LaunchTarget {
             appid: 1,
             client_dir: s.0.join("Steam"),
             compatdata_dir: s.0.join("compatdata/1"),
-            proton_dir: proton.clone(),
-        };
-        assert!(ProtonWine::for_target(&target).is_err(), "no wine binaries yet");
-        std::fs::create_dir_all(proton.join("files/bin")).unwrap();
-        std::fs::write(proton.join("files/bin/wine"), b"").unwrap();
-        std::fs::write(proton.join("files/bin/wineserver"), b"").unwrap();
-        let wine = ProtonWine::for_target(&target).unwrap();
+            proton_dir: proton.to_path_buf(),
+            sandbox: None,
+        }
+    }
 
-        let mut cmd = std::process::Command::new("true");
-        wine.apply(&mut cmd);
-        let envs: HashMap<String, Option<String>> = cmd
-            .get_envs()
-            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
-            .collect();
-        let files = proton.join("files");
-        let at = |rel: &str| files.join(rel).to_string_lossy().into_owned();
-        assert_eq!(envs["WINE"].as_deref(), Some(at("bin/wine").as_str()));
-        assert_eq!(envs["WINESERVER"].as_deref(), Some(at("bin/wineserver").as_str()));
+    fn env_value(env: &[EnvChange], name: &str) -> Vec<String> {
+        env.iter()
+            .filter_map(|c| match c {
+                EnvChange::Set(k, v) if *k == name => Some(format!("set {v}")),
+                EnvChange::Prepend(k, v) if *k == name => Some(format!("prepend {v}")),
+                EnvChange::Append(k, _) if *k == name => Some("append inherited".to_string()),
+                EnvChange::Unset(k) if *k == name => Some("unset".to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn proton_wine_env_mirrors_each_layouts_init_wine() {
+        let s = Scratch::new("protonwine");
+        let cases = [
+            // (name, dist dir, lib64 layout, expected layout)
+            ("Proton - Experimental", "files", false, ProtonLayout::Multiarch),
+            ("Proton 9.0 (Beta)", "files", true, ProtonLayout::Lib64 { dist: "files" }),
+            ("Proton 8.0", "dist", true, ProtonLayout::Lib64 { dist: "dist" }),
+        ];
+        for (name, dist, lib64, layout) in cases {
+            let proton = s.0.join(name);
+            let target = target_for(&s, &proton);
+            assert!(ProtonWine::for_target(&target).is_err(), "{name}: no wine binaries yet");
+            fake_proton(&proton, dist, lib64);
+            assert_eq!(ProtonLayout::detect(&proton), Some(layout), "{name}");
+            let wine = ProtonWine::for_target(&target).unwrap();
+            let d = proton.join(dist);
+            let at = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+            let env = wine.env();
+
+            assert_eq!(env_value(&env, "WINE"), [format!("set {}", at("bin/wine"))], "{name}");
+            assert_eq!(env_value(&env, "WINESERVER"), [format!("set {}", at("bin/wineserver"))]);
+            assert_eq!(
+                env_value(&env, "WINEPREFIX"),
+                [format!("set {}", s.0.join("compatdata/1/pfx").display())]
+            );
+            assert_eq!(env_value(&env, "PATH"), [format!("prepend {}", at("bin"))]);
+            assert_eq!(env_value(&env, "WINEARCH"), ["unset"]);
+            if lib64 {
+                assert_eq!(
+                    env_value(&env, "LD_LIBRARY_PATH"),
+                    [format!("prepend {}:{}", at("lib64"), at("lib"))],
+                    "{name}"
+                );
+                assert_eq!(
+                    env_value(&env, "WINEDLLPATH"),
+                    [format!("set {}:{}", at("lib64/wine"), at("lib/wine"))],
+                    "{name}: replaces any inherited WINEDLLPATH, as that init_wine does"
+                );
+            } else {
+                assert_eq!(
+                    env_value(&env, "LD_LIBRARY_PATH"),
+                    [format!(
+                        "prepend {}:{}:{}",
+                        at("lib/x86_64-linux-gnu"),
+                        at("lib/aarch64-linux-gnu"),
+                        at("lib/i386-linux-gnu")
+                    )],
+                    "{name}"
+                );
+                assert_eq!(
+                    env_value(&env, "WINEDLLPATH"),
+                    [format!("set {}:{}", at("lib/vkd3d"), at("lib/wine")), "append inherited".to_string()],
+                    "{name}"
+                );
+            }
+            assert_eq!(wine.wineserver(), d.join("bin/wineserver"));
+        }
+    }
+
+    #[test]
+    fn shell_env_and_apply_set_the_same_environment() {
+        let s = Scratch::new("shellenv");
+        for (name, dist, lib64) in [("Multi", "files", false), ("Nine", "files", true), ("Eight", "dist", true)] {
+            let proton = s.0.join(name);
+            fake_proton(&proton, dist, lib64);
+            let wine = ProtonWine::for_target(&target_for(&s, &proton)).unwrap();
+            let show = "printenv WINE WINESERVER WINEPREFIX WINEDLLPATH LD_LIBRARY_PATH PATH; printenv WINEARCH || echo no-winearch";
+            // Through the manual command's shell form, with inherited values.
+            let shell = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{} sh -c '{show}'", wine.shell_env()))
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("WINEDLLPATH", "/inherited/dlls")
+                .env("LD_LIBRARY_PATH", "/inherited/libs")
+                .env("WINEARCH", "win32")
+                .output()
+                .unwrap();
+            let shell = String::from_utf8_lossy(&shell.stdout).into_owned();
+            let d = proton.join(dist);
+            let at = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+            let dllpath = if lib64 {
+                format!("{}:{}", at("lib64/wine"), at("lib/wine"))
+            } else {
+                format!("{}:{}:/inherited/dlls", at("lib/vkd3d"), at("lib/wine"))
+            };
+            assert!(shell.contains(&format!("\n{dllpath}\n")), "{name}: {shell}");
+            assert!(shell.contains(":/inherited/libs\n"), "{name}: {shell}");
+            assert!(shell.ends_with("no-winearch\n"), "{name}: {shell}");
+
+            // `apply` against this process's own environment gives the same
+            // result as the shell form run with that same environment.
+            let mut applied = std::process::Command::new("sh");
+            applied.arg("-c").arg(show);
+            wine.apply(&mut applied);
+            let applied = String::from_utf8_lossy(&applied.output().unwrap().stdout).into_owned();
+            let via_shell = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{} sh -c '{show}'", wine.shell_env()))
+                .output()
+                .unwrap();
+            assert_eq!(applied, String::from_utf8_lossy(&via_shell.stdout), "{name}");
+        }
+    }
+
+    #[test]
+    fn flatpak_games_run_proton_inside_their_sandbox() {
+        let s = Scratch::new("flatpakcmd");
+        let mut target = target_for(&s, Path::new("/home/u/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Proton 9.0"));
+        let host = proton_command(&target, ["runinprefix", "x.exe"], &["PROTON_LOG"]);
+        assert_eq!(host.get_program(), target.proton_dir.join("proton"));
+
+        target.sandbox = Some(Sandbox {
+            pid: 4242,
+            client_install_path: Some("/home/u/.var/app/com.valvesoftware.Steam/data/Steam".into()),
+        });
+        let cmd = proton_command(&target, ["runinprefix", "x.exe"], &["PROTON_LOG"]);
+        assert_eq!(cmd.get_program(), "flatpak");
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(
-            envs["WINEPREFIX"].as_deref(),
-            Some(s.0.join("compatdata/1/pfx").to_string_lossy().as_ref())
+            args,
+            [
+                "enter".to_string(),
+                "4242".into(),
+                "env".into(),
+                "-u".into(),
+                "PROTON_LOG".into(),
+                "STEAM_COMPAT_CLIENT_INSTALL_PATH=/home/u/.var/app/com.valvesoftware.Steam/data/Steam".into(),
+                format!("STEAM_COMPAT_DATA_PATH={}", s.0.join("compatdata/1").display()),
+                target.proton_dir.join("proton").to_string_lossy().into_owned(),
+                "runinprefix".into(),
+                "x.exe".into(),
+            ]
         );
-        assert!(envs["PATH"].as_deref().unwrap().starts_with(&format!("{}:", at("bin"))));
-        assert_eq!(envs["WINEARCH"], None, "WINEARCH is removed");
+        // This test process is not in a Flatpak sandbox.
+        assert!(!in_flatpak_sandbox(std::process::id()));
+    }
+
+    #[test]
+    fn proton_dir_is_found_for_both_dist_layouts() {
+        assert_eq!(
+            proton_dir_from_wineserver_exe(Path::new("/s/common/Proton 8.0/dist/bin/wineserver")),
+            Some(PathBuf::from("/s/common/Proton 8.0"))
+        );
+        assert_eq!(
+            proton_dir_from_wineserver_exe(Path::new("/s/common/Proton 9.0/files/bin/wineserver")),
+            Some(PathBuf::from("/s/common/Proton 9.0"))
+        );
+        assert_eq!(proton_dir_from_wineserver_exe(Path::new("/usr/bin/wineserver")), None);
+        assert_eq!(
+            proton_dir_from_config_line("/mnt/dist/files/Steam/steamapps/common/Proton 8.0/dist/share/fonts/"),
+            Some(PathBuf::from("/mnt/dist/files/Steam/steamapps/common/Proton 8.0"))
+        );
+    }
+
+    #[test]
+    fn a_stuck_command_is_stopped_at_its_timeout() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo started; wait"]);
+        let started = std::time::Instant::now();
+        let err = run_with_timeout(cmd, std::time::Duration::from_millis(500), "Test step").unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(err.to_string(), "Test step didn't finish within 0 seconds and was stopped.");
+
+        let mut ok = std::process::Command::new("sh");
+        ok.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let out = run_with_timeout(ok, std::time::Duration::from_secs(10), "Test step").unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(out.stdout, b"out\n");
+        assert_eq!(out.stderr, b"err\n");
     }
 
     #[test]
@@ -1868,6 +2324,7 @@ mod tests {
             client_dir: steam::steam_client_dir().expect("Steam install"),
             compatdata_dir: compat.clone(),
             proton_dir: proton,
+            sandbox: None,
         };
         let prefix = target.prefix_dir();
         assert!(prefix.join("system.reg").is_file(), "create the scratch prefix first");
@@ -1882,10 +2339,30 @@ mod tests {
             panic!("prefix_in_use never became {want}");
         };
 
-        // "The game is running."
+        // Stops the stand-in server however the test ends.
+        struct StopServer<'a>(&'a ProtonWine);
+        impl Drop for StopServer<'_> {
+            fn drop(&mut self) {
+                let mut kill = std::process::Command::new(self.0.wineserver());
+                self.0.apply(&mut kill);
+                let _ = kill.arg("-k").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+            }
+        }
+
+        // "The game is running": a server started the way Proton starts the
+        // game's (its init_session turns on esync and fsync by default, and a
+        // client must use the same synchronization as the server).
         let mut server = std::process::Command::new(wine.wineserver());
         wine.apply(&mut server);
-        assert!(server.env("STEAM_COMPAT_DATA_PATH", &compat).arg("-p").status().unwrap().success());
+        server
+            .env("STEAM_COMPAT_DATA_PATH", &compat)
+            .env("WINEESYNC", "1")
+            .env("WINEFSYNC", "1")
+            .arg("-p")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        assert!(server.status().unwrap().success());
+        let _stop = StopServer(&wine);
         wait_for(true);
         let err = crate::setup::install_dotnet48(&target).unwrap_err();
         println!("installer while running: {err:#}");

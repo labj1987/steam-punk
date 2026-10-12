@@ -42,20 +42,15 @@ cargo build --release --locked
 # ── AppDir layout ─────────────────────────────────────────────────────
 rm -rf "$BUILD_DIR"
 mkdir -p "$APPDIR/usr/bin" \
-         "$APPDIR/usr/lib/$APP" \
          "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
-         "$APPDIR/usr/share/polkit-1/actions" \
          "$APPDIR/usr/share/metainfo"
 
 # Cargo builds into CARGO_TARGET_DIR when it is set (e.g. a target dir shared by several
 # checkouts), else into target/.
 cp "${CARGO_TARGET_DIR:-target}/release/$APP"         "$APPDIR/usr/bin/"
-cp scripts/privileged-setup.sh                        "$APPDIR/usr/lib/$APP/"
-chmod 755 "$APPDIR/usr/lib/$APP/privileged-setup.sh"
 cp data/$APP.desktop                                  "$APPDIR/usr/share/applications/"
 cp data/$APP-256.png                                    "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP.png"
-cp data/io.github.labj1987.SteamPunk.setup.policy  "$APPDIR/usr/share/polkit-1/actions/"
 # The <releases> list is generated from CHANGELOG.md's version headings, and fails the
 # build if the newest one is not this Cargo.toml version.
 python3 scripts/sync_appdata_releases.py
@@ -68,9 +63,10 @@ cp data/$APP-256.png "$APPDIR/$APP.png"
 desktop-file-validate "$APPDIR/$APP.desktop"
 
 # ── AppRun ────────────────────────────────────────────────────────────
-# Just starts the app. The privileged setup script and polkit policy it carries are installed
-# to their fixed system paths (polkit refuses relative/user paths) by the app itself, in the
-# same pkexec call that runs the setup, and only when the user starts that setup.
+# Just starts the app. The privileged setup script and polkit policy are compiled into the
+# binary (not shipped as files, which an extracted AppDir would let the user rewrite) and are
+# installed to their fixed system paths (polkit refuses relative/user paths) by the app itself,
+# in the same pkexec call that runs the setup, and only when the user starts that setup.
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"

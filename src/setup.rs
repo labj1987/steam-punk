@@ -15,15 +15,32 @@ const SCRIPT: &str = "/usr/lib/steam-punk/privileged-setup.sh";
 const POLICY: &str = "/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy";
 pub const LOGFILE: &str = "/var/log/steam-punk.log";
 
-/// Installs the bundled privileged script and policy, then runs the script;
-/// run as root through pkexec when the system copies are missing or stale.
+/// Installs the privileged script and policy, then runs the script; run as
+/// root through pkexec when the system copies are missing or stale.
 const INSTALLER: &str = include_str!("../scripts/install-privileged.sh");
+
+/// The privileged script and polkit policy, compiled into the binary. They
+/// are installed from these bytes, never from files next to the binary
+/// (an extracted AppDir is writable by the user), and root checks the
+/// copies it installs against SHA-256 sums computed at build time
+/// (build.rs), so nothing rewritten between the user staging them and root
+/// installing them can get in.
+const SCRIPT_BYTES: &[u8] = include_bytes!("../scripts/privileged-setup.sh");
+const POLICY_BYTES: &[u8] = include_bytes!("../data/io.github.labj1987.SteamPunk.setup.policy");
+const SCRIPT_SHA256: &str = env!("SP_SETUP_SCRIPT_SHA256");
+const POLICY_SHA256: &str = env!("SP_SETUP_POLICY_SHA256");
+
+/// How long the .NET installer may run (it downloads about 200 MB the first
+/// time), and how long its wineserver may take to shut down afterwards.
+const WINETRICKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const WINESERVER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The winetricks verbs the automatic setup runs, and the manual commands
 /// show. See `install_dotnet48` for `-f`.
 const WINETRICKS_ARGS: [&str; 4] = ["-q", "-f", "dotnet48", "win10"];
 
 /// What the privileged script installs (and `system_prereqs_present` checks).
+/// privileged-setup.sh runs exactly this line; a test holds the two together.
 const APT_INSTALL: &str = "apt-get install -y --no-install-recommends winetricks cabextract";
 
 /// Shown when the winetricks fallback is reached while the game still runs.
@@ -52,81 +69,41 @@ pub fn system_prereqs_present() -> bool {
     present
 }
 
-/// The privileged script and policy inside the running AppImage.
-struct Bundled {
-    script: PathBuf,
-    policy: PathBuf,
-}
-
-fn bundled() -> Option<Bundled> {
-    let appdir = PathBuf::from(std::env::var_os("APPDIR")?);
-    let b = Bundled {
-        script: appdir.join("usr/lib/steam-punk/privileged-setup.sh"),
-        policy: appdir.join("usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy"),
-    };
-    (b.script.is_file() && b.policy.is_file()).then_some(b)
-}
-
-fn same_contents(a: &Path, b: &Path) -> bool {
-    matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
-}
-
-fn sha256(path: &Path) -> Result<String> {
-    let out = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .context("running sha256sum")?;
-    if !out.status.success() {
-        bail!("sha256sum {} failed", path.display());
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.split_whitespace()
-        .next()
-        .map(str::to_string)
-        .with_context(|| format!("no checksum for {}", path.display()))
+fn installed_matches(path: &str, bytes: &[u8]) -> bool {
+    std::fs::read(path).is_ok_and(|b| b == bytes)
 }
 
 /// Runs the privileged one-time setup via pkexec. Only ever called because
 /// the user chose the automatic setup, so this is the one place a password
 /// is asked for. When the system copy of the script and polkit policy is
 /// current, pkexec runs the script directly and polkit shows the policy's
-/// own message; otherwise the bundled copies are installed first, as root in
+/// own message; otherwise the compiled-in copies are installed first, as root in
 /// the same pkexec call (see `scripts/install-privileged.sh`). Bails with a
 /// clear message if pkexec/polkit isn't available or the user cancels.
 pub fn run_system_setup() -> Result<()> {
-    let bundle = bundled();
-    let current = match &bundle {
-        Some(b) => same_contents(&b.script, Path::new(SCRIPT)) && same_contents(&b.policy, Path::new(POLICY)),
-        None => Path::new(SCRIPT).is_file(),
-    };
+    let current = installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
 
     let status = if current {
         crate::applog::log("run_system_setup: launching pkexec privileged-setup.sh");
         Command::new("pkexec").arg(SCRIPT).status()
     } else {
-        let Some(b) = bundle else {
-            crate::applog::log("run_system_setup: script not found");
-            bail!(
-                "The setup script isn't installed at {SCRIPT}, and only the Steam Punk AppImage \
-                 carries it. Run the AppImage, or use the manual commands."
-            );
-        };
-        crate::applog::log("run_system_setup: installing the bundled setup script and policy, then running it");
+        // polkit can only show the policy's own message once the policy is
+        // installed, so this one prompt (which installs it) is pkexec's
+        // generic one for /bin/bash; every later run gets the policy's.
+        crate::applog::log("run_system_setup: installing the setup script and policy, then running it");
         let stage = Stage::new()?;
         let staged_script = stage.0.join("privileged-setup.sh");
         let staged_policy = stage.0.join("policy");
-        std::fs::copy(&b.script, &staged_script).context("staging the setup script")?;
-        std::fs::copy(&b.policy, &staged_policy).context("staging the polkit policy")?;
+        std::fs::write(&staged_script, SCRIPT_BYTES).context("staging the setup script")?;
+        std::fs::write(&staged_policy, POLICY_BYTES).context("staging the polkit policy")?;
         Command::new("pkexec")
             .args(["/bin/bash", "-c", INSTALLER, "bash"])
-            .arg(&b.script)
             .arg(&staged_script)
             .arg(SCRIPT)
-            .arg(sha256(&b.script)?)
-            .arg(&b.policy)
+            .arg(SCRIPT_SHA256)
             .arg(&staged_policy)
             .arg(POLICY)
-            .arg(sha256(&b.policy)?)
+            .arg(POLICY_SHA256)
             .status()
     }
     .context("Failed to launch pkexec — is polkit installed?")?;
@@ -203,11 +180,16 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     ));
     let mut cmd = Command::new("winetricks");
     wine.apply(&mut cmd);
-    let output = cmd
-        .args(WINETRICKS_ARGS)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("Failed to launch winetricks — is it installed?")?;
+    cmd.args(WINETRICKS_ARGS);
+    let output = match launcher::run_with_timeout(cmd, WINETRICKS_TIMEOUT, "The .NET installer (winetricks)") {
+        Ok(o) => o,
+        Err(e) => {
+            // Its wine processes and their wineserver (which runs in its own
+            // session) belong to this prefix alone: the game is closed.
+            stop_prefix_wine(&wine);
+            return Err(e);
+        }
+    };
 
     append_to_log(&output.stdout, &output.stderr);
     crate::applog::log(&format!(
@@ -220,8 +202,13 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     // check that follows reads the final state.
     let mut wait = Command::new(wine.wineserver());
     wine.apply(&mut wait);
-    let waited = wait.arg("-w").status();
-    crate::applog::log(&format!("install_dotnet48: wineserver -w -> {waited:?}"));
+    wait.arg("-w");
+    let waited = launcher::run_with_timeout(wait, WINESERVER_EXIT_TIMEOUT, "Waiting for the installer's wineserver to exit");
+    crate::applog::log(&format!("install_dotnet48: wineserver -w -> {:?}", waited.as_ref().map(|o| o.status)));
+    if let Err(e) = waited {
+        stop_prefix_wine(&wine);
+        bail!("{e} The prefix may be missing the last registry changes; run the setup again.");
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -237,6 +224,17 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Kills every wine process in the prefix and its wineserver
+/// (`wineserver -k`, Proton's own). Only used once the game is closed, when
+/// whatever runs in the prefix is the installer's.
+fn stop_prefix_wine(wine: &ProtonWine) {
+    let mut kill = Command::new(wine.wineserver());
+    wine.apply(&mut kill);
+    kill.arg("-k");
+    let r = launcher::run_with_timeout(kill, std::time::Duration::from_secs(30), "Stopping the installer's wine processes");
+    crate::applog::log(&format!("stop_prefix_wine: wineserver -k -> {:?}", r.map(|o| o.status)));
 }
 
 /// The last `n` lines of `text` — winetricks output runs to hundreds of
@@ -292,6 +290,7 @@ mod tests {
             client_dir: PathBuf::from("/home/u/.local/share/Steam"),
             compatdata_dir: PathBuf::from("/mnt/My Games/steamapps/compatdata/1"),
             proton_dir: proton.to_path_buf(),
+            sandbox: None,
         }
     }
 
@@ -335,7 +334,30 @@ mod tests {
     #[test]
     fn manual_commands_explain_a_proton_build_without_wine() {
         let text = manual_commands(&target(Path::new("/nonexistent/Proton 9.0")), true);
-        assert!(text.contains("has no bin/wine"), "{text}");
+        assert!(text.contains("has no wine"), "{text}");
+    }
+
+    #[test]
+    fn the_privileged_script_runs_exactly_the_install_line() {
+        let script = std::str::from_utf8(SCRIPT_BYTES).unwrap();
+        assert!(
+            script.lines().any(|l| l.contains(&format!("if ! {APT_INSTALL} >>"))),
+            "privileged-setup.sh no longer runs `{APT_INSTALL}`"
+        );
+    }
+
+    #[test]
+    fn pinned_hashes_match_the_compiled_in_files() {
+        for (bytes, sum) in [(SCRIPT_BYTES, SCRIPT_SHA256), (POLICY_BYTES, POLICY_SHA256)] {
+            let mut child = Command::new("sha256sum")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(bytes).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout).split_whitespace().next(), Some(sum));
+        }
     }
 
     #[test]
