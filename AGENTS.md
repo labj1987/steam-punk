@@ -207,8 +207,8 @@ checkout:
    `softprops/action-gh-release`, with that version's changelog section as
    the release text.
 
-Actions in both workflows are pinned to full commit SHAs; Dependabot
-(`.github/dependabot.yml`) proposes the updates. Every job has a
+Actions in both workflows are pinned to full commit SHAs; the weekly
+maintenance round updates them (see `.github/dependabot.yml`). Every job has a
 `timeout-minutes`; CI cancels a superseded pull-request run, and a release
 is never cancelled midway (one per tag at a time).
 
