@@ -37,6 +37,13 @@ fn esc(s: &str) -> String {
     glib::markup_escape_text(s).to_string()
 }
 
+// A toast's title is Pango markup by default too, and toasts carry error
+// text (Wine output is full of `<null>`) and trainer names: shown as plain
+// text, so a message with `<` or `&` doesn't come up as an empty toast.
+fn toast(text: &str) -> Toast {
+    Toast::builder().title(text).use_markup(false).build()
+}
+
 fn spawn_async<F, T, CB>(future: F, callback: CB)
 where
     F: std::future::Future<Output = T> + Send + 'static,
@@ -177,7 +184,7 @@ pub fn build_ui(app: &Application) {
             });
             if listing.meta_error != *meta_error_shown.borrow() {
                 if let Some(e) = &listing.meta_error {
-                    toast_overlay.add_toast(Toast::new(e));
+                    toast_overlay.add_toast(toast(e));
                 }
                 *meta_error_shown.borrow_mut() = listing.meta_error.clone();
             }
@@ -278,7 +285,7 @@ pub fn build_ui(app: &Application) {
                     let self_slot = self_slot.clone();
                     remove_btn.connect_clicked(move |_| {
                         if let Err(e) = library::remove_trainer(&trainer.path) {
-                            toast_overlay.add_toast(Toast::new(&format!("Remove failed: {e}")));
+                            toast_overlay.add_toast(toast(&format!("Remove failed: {e}")));
                             return;
                         }
                         if let Some(reload) = self_slot.borrow().clone() {
@@ -369,7 +376,7 @@ pub fn build_ui(app: &Application) {
                                 r.remove(path);
                                 changed = true;
                                 if let Some(cause) = diagnosis.as_ref().and_then(|d| d.lines().next()) {
-                                    toast_overlay.add_toast(Toast::new(&format!(
+                                    toast_overlay.add_toast(toast(&format!(
                                         "Trainer exited right after launch. {cause}"
                                     )));
                                 }
@@ -417,7 +424,7 @@ pub fn build_ui(app: &Application) {
                         let queue = Rc::new(RefCell::new(vec![dest]));
                         prompt_appid_for_queue(window2.clone(), queue, refresh_list.clone(), toast_overlay.clone());
                     }
-                    Err(e) => toast_overlay.add_toast(Toast::new(&format!("Import failed: {e}"))),
+                    Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
                 }
             });
         });
@@ -443,7 +450,7 @@ pub fn build_ui(app: &Application) {
                 }
                 match library::import_trainer(&path) {
                     Ok(dest) => imported.push(dest),
-                    Err(e) => toast_overlay.add_toast(Toast::new(&format!("Import failed: {e}"))),
+                    Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
                 }
             }
             let imported_any = !imported.is_empty();
@@ -507,7 +514,7 @@ fn prompt_appid_for_queue(
 ) {
     let Some(trainer_path) = queue.borrow_mut().pop() else {
         refresh_list();
-        toast_overlay.add_toast(Toast::new("Trainer imported"));
+        toast_overlay.add_toast(toast("Trainer imported"));
         return;
     };
     let Some(filename) = trainer_path
@@ -627,7 +634,7 @@ fn prompt_appid_for_queue(
                     });
                 }
                 Err(e) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Could not save AppID: {e:#}")));
+                    toast_overlay.add_toast(toast(&format!("Could not save AppID: {e:#}")));
                 }
             }
             dialog.close();
@@ -823,9 +830,8 @@ fn prompt_appid_for_queue(
             match trimmed.parse::<u32>() {
                 Ok(appid) => confirm(appid),
                 Err(_) => {
-                    toast_overlay.add_toast(Toast::new(
-                        "That doesn't look like a numeric AppID — skipped",
-                    ));
+                    toast_overlay
+                        .add_toast(toast("That doesn't look like a numeric AppID — skipped"));
                     dialog.close();
                 }
             }
@@ -872,13 +878,13 @@ fn with_launch_target(
             let games = match result {
                 Ok(games) => games,
                 Err(e) => {
-                    toast_overlay.add_toast(Toast::new(&format!("Task error: {e}")));
+                    toast_overlay.add_toast(toast(&format!("Task error: {e}")));
                     return;
                 }
             };
 
             match games.len() {
-                0 => toast_overlay.add_toast(Toast::new(
+                0 => toast_overlay.add_toast(toast(
                     "Start the game first, load past the menus, then launch the trainer.",
                 )),
                 1 => resolve_target_then(games[0].appid, &toast_overlay, proceed),
@@ -900,8 +906,8 @@ fn resolve_target_then(
         },
         move |result| match result {
             Ok(Ok(target)) => proceed(target),
-            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&e.to_string())),
-            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
+            Ok(Err(e)) => toast_overlay.add_toast(toast(&e.to_string())),
+            Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
@@ -1030,7 +1036,7 @@ fn wire_launch_button(
                                 None => proceed(),
                             }
                         }
-                        Err(e) => toasts.add_toast(Toast::new(&format!("Task error: {e}"))),
+                        Err(e) => toasts.add_toast(toast(&format!("Task error: {e}"))),
                     },
                 );
             }),
@@ -1098,9 +1104,8 @@ fn launch_trainer_now(
         move |launch_result| match launch_result {
             Ok(Ok(pgid)) => {
                 let _guard = &guard;
-                toast_overlay2.add_toast(Toast::new(&format!(
-                    "Launched {trainer_name} (AppId {appid})"
-                )));
+                toast_overlay2
+                    .add_toast(toast(&format!("Launched {trainer_name} (AppId {appid})")));
                 running.borrow_mut().insert(trainer.path.clone(), pgid);
                 if let Some(refresh) = refresh_slot.borrow().clone() {
                     refresh();
@@ -1108,9 +1113,9 @@ fn launch_trainer_now(
             }
             Ok(Err(e)) => {
                 launcher::record_failure(&format!("Could not start the trainer through Proton: {e:#}"));
-                toast_overlay2.add_toast(Toast::new(&format!("Launch failed: {e}")));
+                toast_overlay2.add_toast(toast(&format!("Launch failed: {e}")));
             }
-            Err(e) => toast_overlay2.add_toast(Toast::new(&format!("Task error: {e}"))),
+            Err(e) => toast_overlay2.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
@@ -1137,9 +1142,9 @@ fn wire_stop_button(
             async move { tokio::task::spawn_blocking(move || launcher::stop_trainer(pgid)).await },
             move |result| {
                 if let Err(e) = result {
-                    toast_overlay.add_toast(Toast::new(&format!("Stop task error: {e}")));
+                    toast_overlay.add_toast(toast(&format!("Stop task error: {e}")));
                 } else {
-                    toast_overlay.add_toast(Toast::new("Trainer stopped"));
+                    toast_overlay.add_toast(toast("Trainer stopped"));
                 }
                 running.borrow_mut().remove(&trainer_path);
                 if let Some(refresh) = refresh_slot.borrow().clone() {
@@ -1274,7 +1279,7 @@ fn run_automatic_setup(
     refresh_slot: RefreshSlot,
     guard: Rc<PendingLaunch>,
 ) {
-    toast_overlay.add_toast(Toast::new("Setting up .NET — this may take a minute or two…"));
+    toast_overlay.add_toast(toast("Setting up .NET — this may take a minute or two…"));
 
     spawn_async(
         async move {
@@ -1300,8 +1305,8 @@ fn run_automatic_setup(
             Ok(Ok(CloneOutcome::NoDonor(target))) => {
                 show_quit_game_dialog(&window, target, toast_overlay, guard, false)
             }
-            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e:#}"))),
-            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
+            Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
+            Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
@@ -1365,7 +1370,7 @@ fn run_installer(
     toast_overlay: ToastOverlay,
     guard: Rc<PendingLaunch>,
 ) {
-    toast_overlay.add_toast(Toast::new("Installing .NET — this takes a few minutes…"));
+    toast_overlay.add_toast(toast("Installing .NET — this takes a few minutes…"));
     spawn_async(
         async move {
             tokio::task::spawn_blocking(move || -> anyhow::Result<InstallOutcome> {
@@ -1393,14 +1398,14 @@ fn run_installer(
             .await
         },
         move |result| match result {
-            Ok(Ok(InstallOutcome::Done)) => toast_overlay.add_toast(Toast::new(
+            Ok(Ok(InstallOutcome::Done)) => toast_overlay.add_toast(toast(
                 ".NET is installed. Start the game again, then launch the trainer.",
             )),
             Ok(Ok(InstallOutcome::StillRunning(target))) => {
                 show_quit_game_dialog(&window, target, toast_overlay, guard, true)
             }
-            Ok(Err(e)) => toast_overlay.add_toast(Toast::new(&format!("Setup failed: {e:#}"))),
-            Err(e) => toast_overlay.add_toast(Toast::new(&format!("Task error: {e}"))),
+            Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
+            Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
