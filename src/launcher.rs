@@ -142,7 +142,10 @@ fn find_game_wineserver(compatdata_dir: &Path) -> Option<GameServer> {
             continue;
         };
         let normalized_exe = normalize_lexical(&exe_target);
-        if !normalized_exe.to_string_lossy().ends_with("/bin/wineserver") {
+        if !normalized_exe
+            .to_string_lossy()
+            .ends_with("/bin/wineserver")
+        {
             continue;
         }
 
@@ -248,7 +251,9 @@ pub fn resolve_launch_target(appid: u32) -> Result<LaunchTarget> {
     // compatdata is in one of their libraries. If more than one has it, the
     // one whose wineserver is running is the game's.
     let roots = steam::metadata_roots();
-    crate::applog::log(&format!("resolve_launch_target: Steam installs -> {roots:?}"));
+    crate::applog::log(&format!(
+        "resolve_launch_target: Steam installs -> {roots:?}"
+    ));
     if roots.is_empty() {
         return Err(anyhow!("Could not find a Steam installation."));
     }
@@ -279,16 +284,22 @@ pub fn resolve_launch_target(appid: u32) -> Result<LaunchTarget> {
         .as_ref()
         .and_then(|s| s.proton_dir.clone())
         .or_else(|| find_proton_dir_from_config_info(&compatdata_dir));
-    crate::applog::log(&format!("resolve_launch_target: proton_dir -> {proton_dir:?}"));
+    crate::applog::log(&format!(
+        "resolve_launch_target: proton_dir -> {proton_dir:?}"
+    ));
     let proton_dir = proton_dir.ok_or_else(|| {
         anyhow!("Could not determine which Proton build the game is currently running.")
     })?;
 
-    let sandbox = server.filter(|s| in_flatpak_sandbox(s.pid)).map(|s| Sandbox {
-        pid: s.pid,
-        client_install_path: s.client_install_path,
-    });
-    crate::applog::log(&format!("resolve_launch_target: Flatpak sandbox -> {sandbox:?}"));
+    let sandbox = server
+        .filter(|s| in_flatpak_sandbox(s.pid))
+        .map(|s| Sandbox {
+            pid: s.pid,
+            client_install_path: s.client_install_path,
+        });
+    crate::applog::log(&format!(
+        "resolve_launch_target: Flatpak sandbox -> {sandbox:?}"
+    ));
 
     Ok(LaunchTarget {
         appid,
@@ -459,7 +470,8 @@ fn parse_dotnet_release(text: &str) -> Option<u32> {
     let mut in_full = false;
     for line in text.lines() {
         if line.starts_with('[') {
-            in_full = line.starts_with(r"[Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full]");
+            in_full =
+                line.starts_with(r"[Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full]");
             continue;
         }
         if in_full {
@@ -521,8 +533,10 @@ pub fn prefix_health(target: &LaunchTarget) -> (bool, String) {
         s.clr_present,
         s.mscoree_native,
         s.crt_present,
-        s.release
-            .map_or_else(|| "absent".to_string(), |r| format!("{r} (need >= {DOTNET_462_RELEASE})")),
+        s.release.map_or_else(
+            || "absent".to_string(),
+            |r| format!("{r} (need >= {DOTNET_462_RELEASE})")
+        ),
     ));
     (usable, s.summary())
 }
@@ -563,8 +577,18 @@ pub fn run_with_timeout(
             buf
         })
     };
-    let out_t = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err_t = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let out_t = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err_t = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
 
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
@@ -578,7 +602,10 @@ pub fn run_with_timeout(
                 libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
             }
             let _ = child.wait();
-            crate::applog::log(&format!("{what}: timed out after {}s, stopped it", timeout.as_secs()));
+            crate::applog::log(&format!(
+                "{what}: timed out after {}s, stopped it",
+                timeout.as_secs()
+            ));
             return Err(anyhow!(
                 "{what} didn't finish within {} and was stopped.",
                 human_duration(timeout)
@@ -624,7 +651,14 @@ fn live_dotnet_release(target: &LaunchTarget) -> Result<Option<u32>> {
     // With PROTON_LOG set, Proton sends wine's stdout to its log file.
     let cmd = proton_command(
         target,
-        ["runinprefix", "reg", "query", NDP_V4_FULL_KEY, "/v", "Release"],
+        [
+            "runinprefix",
+            "reg",
+            "query",
+            NDP_V4_FULL_KEY,
+            "/v",
+            "Release",
+        ],
         &["PROTON_LOG"],
     );
     let out = run_with_timeout(cmd, REG_TIMEOUT, "Reading the game's registry (reg query)")?;
@@ -650,7 +684,9 @@ fn parse_reg_query_dword(output: &str, name: &str) -> Option<u32> {
             return None;
         }
         let value = fields.next()?;
-        let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+        let hex = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))?;
         u32::from_str_radix(hex, 16).ok()
     })
 }
@@ -683,8 +719,11 @@ pub fn prefix_in_use(prefix: &Path) -> bool {
     };
     entries.flatten().any(|entry| {
         entry.file_name().to_string_lossy().parse::<u32>().is_ok()
-            && std::fs::read_link(entry.path().join("exe"))
-                .is_ok_and(|exe| normalize_lexical(&exe).to_string_lossy().ends_with("/wineserver"))
+            && std::fs::read_link(entry.path().join("exe")).is_ok_and(|exe| {
+                normalize_lexical(&exe)
+                    .to_string_lossy()
+                    .ends_with("/wineserver")
+            })
             && std::fs::read_link(entry.path().join("cwd")).is_ok_and(|cwd| cwd == server_dir)
     })
 }
@@ -906,7 +945,8 @@ fn log_dosdevices(target: &LaunchTarget) {
         // com1..com32/lpt1..lpt3 are Wine's default virtual port symlinks,
         // routinely dangling on any machine without legacy serial hardware,
         // and would just bury the real signal in expected-looking noise.
-        let is_drive_letter = matches!(entry.file_name().to_str(), Some(n) if n.len() == 2 && n.ends_with(':'));
+        let is_drive_letter =
+            matches!(entry.file_name().to_str(), Some(n) if n.len() == 2 && n.ends_with(':'));
         if !is_drive_letter {
             continue;
         }
@@ -960,11 +1000,16 @@ pub fn launch_trainer(target: &LaunchTarget, trainer_path: &Path, log_path: &Pat
     let log_offset = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
 
     let proton = target.proton_dir.join("proton");
-    let mut cmd = proton_command(target, [std::ffi::OsStr::new("runinprefix"), trainer_path.as_os_str()], &[]);
+    let mut cmd = proton_command(
+        target,
+        [
+            std::ffi::OsStr::new("runinprefix"),
+            trainer_path.as_os_str(),
+        ],
+        &[],
+    );
     crate::applog::log(&format!("launch_trainer: {cmd:?}"));
-    cmd.stdin(Stdio::null())
-        .stdout(log_out)
-        .stderr(log_err);
+    cmd.stdin(Stdio::null()).stdout(log_out).stderr(log_err);
     spawn_tracked(
         cmd,
         LaunchInfo {
@@ -1045,7 +1090,11 @@ fn spawn_tracked(mut cmd: std::process::Command, info: LaunchInfo) -> Result<u32
     // `LaunchRecord`).
     std::thread::spawn(move || {
         for i in 0u32.. {
-            std::thread::sleep(std::time::Duration::from_millis(if i < 10 { 200 } else { 1000 }));
+            std::thread::sleep(std::time::Duration::from_millis(if i < 10 {
+                200
+            } else {
+                1000
+            }));
             // Checked under the lock that `release_launch` takes, so the pid
             // can't be reaped (and reused) between the check and the peek.
             let peek = {
@@ -1065,13 +1114,17 @@ fn spawn_tracked(mut cmd: std::process::Command, info: LaunchInfo) -> Result<u32
                              this line and the exit code for signs of an actual error)"
                         ));
                     } else {
-                        crate::applog::log(&format!("launch_trainer: pid {pid} exited with {status}"));
+                        crate::applog::log(&format!(
+                            "launch_trainer: pid {pid} exited with {status}"
+                        ));
                     }
                     return;
                 }
                 Ok(None) => {
                     if i == 9 {
-                        crate::applog::log(&format!("launch_trainer: pid {pid} still running after 2s"));
+                        crate::applog::log(&format!(
+                            "launch_trainer: pid {pid} still running after 2s"
+                        ));
                     }
                 }
                 Err(e) => {
@@ -1191,7 +1244,9 @@ fn likely_causes(i: &DiagInputs) -> Vec<String> {
         );
     }
     if let Some(problem) = &i.dotnet_problem {
-        causes.push(format!("{problem}. Launch again to run the one-time setup."));
+        causes.push(format!(
+            "{problem}. Launch again to run the one-time setup."
+        ));
     } else if i.output.contains("err:module:import_dll") {
         causes.push(
             "Wine could not load a library the trainer needs; ~/.local/share/steam-punk/steam-punk.log has the details."
@@ -1209,7 +1264,9 @@ fn read_output_tail(path: &Path, offset: u64) -> String {
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let start = offset.max(len.saturating_sub(OUTPUT_TAIL_BYTES));
     let mut buf = Vec::new();
-    if file.seek(SeekFrom::Start(start)).is_err() || file.take(OUTPUT_TAIL_BYTES).read_to_end(&mut buf).is_err() {
+    if file.seek(SeekFrom::Start(start)).is_err()
+        || file.take(OUTPUT_TAIL_BYTES).read_to_end(&mut buf).is_err()
+    {
         return String::new();
     }
     String::from_utf8_lossy(&buf).into_owned()
@@ -1274,7 +1331,8 @@ fn install_has_anticheat(dir: &Path) -> bool {
     })
 }
 
-static ANTICHEAT_NOTICED: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static ANTICHEAT_NOTICED: LazyLock<Mutex<HashSet<u32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Whether to warn: the game is on the known online list, or anti-cheat is
 /// in its install AND it is known to have online play. An unknown online
@@ -1383,7 +1441,9 @@ pub fn stop_trainer(pgid: u32) {
         }
     }
 
-    crate::applog::log(&format!("stop_trainer: pgid {pgid} still alive after 2s, sending SIGKILL"));
+    crate::applog::log(&format!(
+        "stop_trainer: pgid {pgid} still alive after 2s, sending SIGKILL"
+    ));
     let r = signal_launch(pgid, libc::SIGKILL);
     crate::applog::log(&format!("stop_trainer: SIGKILL -{pgid} -> {r:?}"));
 
@@ -1528,10 +1588,19 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
 
     let cmd = proton_command(
         target,
-        ["runinprefix", "regedit", "/S", r"C:\windows\temp\steam-punk-dotnet.reg"],
+        [
+            "runinprefix",
+            "regedit",
+            "/S",
+            r"C:\windows\temp\steam-punk-dotnet.reg",
+        ],
         &[],
     );
-    let out = run_with_timeout(cmd, REG_TIMEOUT, "Importing the .NET registry keys (regedit)");
+    let out = run_with_timeout(
+        cmd,
+        REG_TIMEOUT,
+        "Importing the .NET registry keys (regedit)",
+    );
     // The temp .reg is only needed for the import; drop it either way.
     let _ = std::fs::remove_file(&reg_path);
     let out = out?;
@@ -1540,7 +1609,10 @@ fn apply_dotnet_registry(target: &LaunchTarget, donor_prefix: &Path) -> Result<(
     crate::applog::log(&format!("apply_dotnet_registry: regedit exited {status:?}"));
     if !status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        crate::applog::log(&format!("apply_dotnet_registry: regedit output: {}", stderr.trim()));
+        crate::applog::log(&format!(
+            "apply_dotnet_registry: regedit output: {}",
+            stderr.trim()
+        ));
         let tail: Vec<&str> = stderr.lines().rev().take(5).collect();
         let tail: Vec<&str> = tail.into_iter().rev().collect();
         return Err(anyhow!(
@@ -1635,7 +1707,9 @@ pub fn repair_dotnet_from_sibling_prefix(target: &LaunchTarget) -> Result<bool> 
         }
         let mut copied = 0usize;
         for src in dotnet_system_files(&donor.join(dir)) {
-            let Some(name) = src.file_name() else { continue };
+            let Some(name) = src.file_name() else {
+                continue;
+            };
             // Overwrite whatever is there under its existing casing — what's
             // present is typically Wine's builtin stub or a 4.0-era copy, and
             // both are exactly the problem being repaired.
@@ -1672,7 +1746,9 @@ mod tests {
             proton_dir_from_config_line(
                 "/mnt/ProtonDrive/steamapps/common/Proton - Experimental/files/share/fonts/"
             ),
-            Some(PathBuf::from("/mnt/ProtonDrive/steamapps/common/Proton - Experimental"))
+            Some(PathBuf::from(
+                "/mnt/ProtonDrive/steamapps/common/Proton - Experimental"
+            ))
         );
         assert_eq!(proton_dir_from_config_line("/no/marker/here"), None);
     }
@@ -1750,7 +1826,10 @@ mod tests {
         let mut perms = std::fs::metadata(&dst).unwrap().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&dst, perms).unwrap();
-        assert!(std::fs::File::create(&dst).is_err(), "test setup: dst should be unwritable");
+        assert!(
+            std::fs::File::create(&dst).is_err(),
+            "test setup: dst should be unwritable"
+        );
 
         let src = s.0.join("new-System.dll");
         std::fs::write(&src, b"fresh").unwrap();
@@ -1803,9 +1882,8 @@ mod tests {
     fn reg_export_selects_dotnet_keys_and_unescapes_them() {
         let out = dotnet_reg_export(SAMPLE);
         assert!(out.starts_with("Windows Registry Editor Version 5.00\n"));
-        assert!(out.contains(
-            r"[HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Full]"
-        ));
+        assert!(out
+            .contains(r"[HKEY_LOCAL_MACHINE\Software\Microsoft\NET Framework Setup\NDP\v4\Full]"));
         assert!(out.contains("\"Release\"=dword:00080eb1"));
     }
 
@@ -1968,7 +2046,10 @@ mod tests {
         let out = "\r\nHKEY_LOCAL_MACHINE\\Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\r\n    Release    REG_DWORD    0x80ff4\r\n\r\n";
         assert_eq!(parse_reg_query_dword(out, "Release"), Some(0x80ff4));
         assert_eq!(parse_reg_query_dword(out, "Version"), None);
-        assert_eq!(parse_reg_query_dword("    Release    REG_SZ    4.8\n", "Release"), None);
+        assert_eq!(
+            parse_reg_query_dword("    Release    REG_SZ    4.8\n", "Release"),
+            None
+        );
         assert_eq!(parse_reg_query_dword("", "Release"), None);
     }
 
@@ -2000,7 +2081,10 @@ mod tests {
         std::fs::create_dir_all(lib_a.join("101/pfx")).unwrap();
         fake_dotnet_prefix(&lib_b.join("200/pfx"));
         let roots = vec![lib_a.clone(), lib_b.clone()];
-        assert_eq!(find_donor_prefix(&roots, &ours), Some(lib_b.join("200/pfx")));
+        assert_eq!(
+            find_donor_prefix(&roots, &ours),
+            Some(lib_b.join("200/pfx"))
+        );
         // Only the target's own library: nothing to copy from.
         assert_eq!(find_donor_prefix(&roots[..1], &ours), None);
         // The game's own prefix never donates to itself, even when usable.
@@ -2049,14 +2133,32 @@ mod tests {
         let s = Scratch::new("protonwine");
         let cases = [
             // (name, dist dir, lib64 layout, expected layout)
-            ("Proton - Experimental", "files", false, ProtonLayout::Multiarch),
-            ("Proton 9.0 (Beta)", "files", true, ProtonLayout::Lib64 { dist: "files" }),
-            ("Proton 8.0", "dist", true, ProtonLayout::Lib64 { dist: "dist" }),
+            (
+                "Proton - Experimental",
+                "files",
+                false,
+                ProtonLayout::Multiarch,
+            ),
+            (
+                "Proton 9.0 (Beta)",
+                "files",
+                true,
+                ProtonLayout::Lib64 { dist: "files" },
+            ),
+            (
+                "Proton 8.0",
+                "dist",
+                true,
+                ProtonLayout::Lib64 { dist: "dist" },
+            ),
         ];
         for (name, dist, lib64, layout) in cases {
             let proton = s.0.join(name);
             let target = target_for(&s, &proton);
-            assert!(ProtonWine::for_target(&target).is_err(), "{name}: no wine binaries yet");
+            assert!(
+                ProtonWine::for_target(&target).is_err(),
+                "{name}: no wine binaries yet"
+            );
             fake_proton(&proton, dist, lib64);
             assert_eq!(ProtonLayout::detect(&proton), Some(layout), "{name}");
             let wine = ProtonWine::for_target(&target).unwrap();
@@ -2064,8 +2166,15 @@ mod tests {
             let at = |rel: &str| d.join(rel).to_string_lossy().into_owned();
             let env = wine.env();
 
-            assert_eq!(env_value(&env, "WINE"), [format!("set {}", at("bin/wine"))], "{name}");
-            assert_eq!(env_value(&env, "WINESERVER"), [format!("set {}", at("bin/wineserver"))]);
+            assert_eq!(
+                env_value(&env, "WINE"),
+                [format!("set {}", at("bin/wine"))],
+                "{name}"
+            );
+            assert_eq!(
+                env_value(&env, "WINESERVER"),
+                [format!("set {}", at("bin/wineserver"))]
+            );
             assert_eq!(
                 env_value(&env, "WINEPREFIX"),
                 [format!("set {}", s.0.join("compatdata/1/pfx").display())]
@@ -2096,7 +2205,10 @@ mod tests {
                 );
                 assert_eq!(
                     env_value(&env, "WINEDLLPATH"),
-                    [format!("set {}:{}", at("lib/vkd3d"), at("lib/wine")), "append inherited".to_string()],
+                    [
+                        format!("set {}:{}", at("lib/vkd3d"), at("lib/wine")),
+                        "append inherited".to_string()
+                    ],
                     "{name}"
                 );
             }
@@ -2107,7 +2219,11 @@ mod tests {
     #[test]
     fn shell_env_and_apply_set_the_same_environment() {
         let s = Scratch::new("shellenv");
-        for (name, dist, lib64) in [("Multi", "files", false), ("Nine", "files", true), ("Eight", "dist", true)] {
+        for (name, dist, lib64) in [
+            ("Multi", "files", false),
+            ("Nine", "files", true),
+            ("Eight", "dist", true),
+        ] {
             let proton = s.0.join(name);
             fake_proton(&proton, dist, lib64);
             let wine = ProtonWine::for_target(&target_for(&s, &proton)).unwrap();
@@ -2146,14 +2262,23 @@ mod tests {
                 .arg(format!("{} sh -c '{show}'", wine.shell_env()))
                 .output()
                 .unwrap();
-            assert_eq!(applied, String::from_utf8_lossy(&via_shell.stdout), "{name}");
+            assert_eq!(
+                applied,
+                String::from_utf8_lossy(&via_shell.stdout),
+                "{name}"
+            );
         }
     }
 
     #[test]
     fn flatpak_games_run_proton_inside_their_sandbox() {
         let s = Scratch::new("flatpakcmd");
-        let mut target = target_for(&s, Path::new("/home/u/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Proton 9.0"));
+        let mut target = target_for(
+            &s,
+            Path::new(
+                "/home/u/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/Proton 9.0",
+            ),
+        );
         let host = proton_command(&target, ["runinprefix", "x.exe"], &["PROTON_LOG"]);
         assert_eq!(host.get_program(), target.proton_dir.join("proton"));
 
@@ -2163,7 +2288,10 @@ mod tests {
         });
         let cmd = proton_command(&target, ["runinprefix", "x.exe"], &["PROTON_LOG"]);
         assert_eq!(cmd.get_program(), "flatpak");
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
             args,
             [
@@ -2193,10 +2321,17 @@ mod tests {
             proton_dir_from_wineserver_exe(Path::new("/s/common/Proton 9.0/files/bin/wineserver")),
             Some(PathBuf::from("/s/common/Proton 9.0"))
         );
-        assert_eq!(proton_dir_from_wineserver_exe(Path::new("/usr/bin/wineserver")), None);
         assert_eq!(
-            proton_dir_from_config_line("/mnt/dist/files/Steam/steamapps/common/Proton 8.0/dist/share/fonts/"),
-            Some(PathBuf::from("/mnt/dist/files/Steam/steamapps/common/Proton 8.0"))
+            proton_dir_from_wineserver_exe(Path::new("/usr/bin/wineserver")),
+            None
+        );
+        assert_eq!(
+            proton_dir_from_config_line(
+                "/mnt/dist/files/Steam/steamapps/common/Proton 8.0/dist/share/fonts/"
+            ),
+            Some(PathBuf::from(
+                "/mnt/dist/files/Steam/steamapps/common/Proton 8.0"
+            ))
         );
     }
 
@@ -2205,9 +2340,13 @@ mod tests {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "sleep 30 & echo started; wait"]);
         let started = std::time::Instant::now();
-        let err = run_with_timeout(cmd, std::time::Duration::from_millis(500), "Test step").unwrap_err();
+        let err =
+            run_with_timeout(cmd, std::time::Duration::from_millis(500), "Test step").unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        assert_eq!(err.to_string(), "Test step didn't finish within 0 seconds and was stopped.");
+        assert_eq!(
+            err.to_string(),
+            "Test step didn't finish within 0 seconds and was stopped."
+        );
 
         let mut ok = std::process::Command::new("sh");
         ok.args(["-c", "echo out; echo err >&2; exit 3"]);
@@ -2221,10 +2360,16 @@ mod tests {
     fn shell_quote_survives_quotes_and_spaces() {
         let out = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!("printf %s {}", shell_quote("it's a \"Proton\" $dir")))
+            .arg(format!(
+                "printf %s {}",
+                shell_quote("it's a \"Proton\" $dir")
+            ))
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "it's a \"Proton\" $dir");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "it's a \"Proton\" $dir"
+        );
     }
 
     #[test]
@@ -2248,7 +2393,13 @@ mod tests {
 
     fn proc_state(pid: u32) -> Option<String> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        Some(stat.rsplit_once(')')?.1.split_whitespace().next()?.to_string())
+        Some(
+            stat.rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .next()?
+                .to_string(),
+        )
     }
 
     #[test]
@@ -2264,13 +2415,19 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert!(zombie, "the exited leader stays unreaped, holding pid {pgid}");
+        assert!(
+            zombie,
+            "the exited leader stays unreaped, holding pid {pgid}"
+        );
         assert!(!process_group_alive(pgid));
         assert_eq!(peek_exit(pgid).unwrap().as_deref(), Some("exit status: 3"));
 
         // Gone right after launch, with no game running: diagnosed as such.
         let diagnosis = finish_launch(pgid).expect("an early exit is diagnosed");
-        assert!(diagnosis.starts_with("The game is no longer running."), "{diagnosis}");
+        assert!(
+            diagnosis.starts_with("The game is no longer running."),
+            "{diagnosis}"
+        );
         assert_eq!(proc_state(pgid), None, "reaped once finished");
         assert!(!launches().contains_key(&pgid));
     }
@@ -2286,7 +2443,10 @@ mod tests {
             .unwrap();
         let stranger_pgid = stranger.id();
         stop_trainer(stranger_pgid);
-        assert!(stranger.try_wait().unwrap().is_none(), "an untracked group was signalled");
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "an untracked group was signalled"
+        );
         assert!(!signal_launch(stranger_pgid, libc::SIGTERM).unwrap());
         stranger.kill().unwrap();
         stranger.wait().unwrap();
@@ -2318,7 +2478,8 @@ mod tests {
     #[ignore]
     fn live_proton_registry_and_installer() {
         let proton = PathBuf::from(std::env::var("SP_LIVE_PROTON").expect("SP_LIVE_PROTON"));
-        let compat = PathBuf::from(std::env::var("SP_LIVE_COMPATDATA").expect("SP_LIVE_COMPATDATA"));
+        let compat =
+            PathBuf::from(std::env::var("SP_LIVE_COMPATDATA").expect("SP_LIVE_COMPATDATA"));
         let target = LaunchTarget {
             appid: 0,
             client_dir: steam::steam_client_dir().expect("Steam install"),
@@ -2327,7 +2488,10 @@ mod tests {
             sandbox: None,
         };
         let prefix = target.prefix_dir();
-        assert!(prefix.join("system.reg").is_file(), "create the scratch prefix first");
+        assert!(
+            prefix.join("system.reg").is_file(),
+            "create the scratch prefix first"
+        );
         let wine = ProtonWine::for_target(&target).unwrap();
         let wait_for = |want: bool| {
             for _ in 0..100 {
@@ -2345,7 +2509,11 @@ mod tests {
             fn drop(&mut self) {
                 let mut kill = std::process::Command::new(self.0.wineserver());
                 self.0.apply(&mut kill);
-                let _ = kill.arg("-k").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                let _ = kill
+                    .arg("-k")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
             }
         }
 
@@ -2389,14 +2557,23 @@ mod tests {
         wine.apply(&mut kill);
         assert!(kill.arg("-k").status().unwrap().success());
         wait_for(false);
-        println!("after the server exited: on disk {:?}", dotnet_release(&prefix));
+        println!(
+            "after the server exited: on disk {:?}",
+            dotnet_release(&prefix)
+        );
 
         if std::env::var("SP_LIVE_WINETRICKS").as_deref() == Ok("1") {
             let started = std::time::Instant::now();
             let result = crate::setup::install_dotnet48(&target);
-            println!("installer with the game closed ({}s): {result:?}", started.elapsed().as_secs());
+            println!(
+                "installer with the game closed ({}s): {result:?}",
+                started.elapsed().as_secs()
+            );
             println!("prefix: {}", dotnet_status(&prefix).summary());
-            assert!(!prefix_in_use(&prefix), "the installer's wineserver was left running");
+            assert!(
+                !prefix_in_use(&prefix),
+                "the installer's wineserver was left running"
+            );
         }
     }
 
@@ -2411,7 +2588,10 @@ mod tests {
         let trainer_path = PathBuf::from(std::env::var("HOME").unwrap())
             .join(".local/share/steam-punk/trainers")
             .join("Grand Theft Auto San Andreas The Definitive Edition v1.0-v1.0.8.11827 Plus 49 Trainer.exe");
-        assert!(trainer_path.is_file(), "test trainer not found at {trainer_path:?}");
+        assert!(
+            trainer_path.is_file(),
+            "test trainer not found at {trainer_path:?}"
+        );
         let log_path = PathBuf::from("/tmp/steam-punk-live-test.log");
 
         let pgid = launch_trainer(&target, &trainer_path, &log_path).expect("launch_trainer");
@@ -2441,4 +2621,3 @@ mod tests {
         println!("confirmed pgid {pgid} fully stopped");
     }
 }
-

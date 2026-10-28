@@ -81,7 +81,8 @@ fn installed_matches(path: &str, bytes: &[u8]) -> bool {
 /// the same pkexec call (see `scripts/install-privileged.sh`). Bails with a
 /// clear message if pkexec/polkit isn't available or the user cancels.
 pub fn run_system_setup() -> Result<()> {
-    let current = installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
+    let current =
+        installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
 
     let status = if current {
         crate::applog::log("run_system_setup: launching pkexec privileged-setup.sh");
@@ -90,7 +91,9 @@ pub fn run_system_setup() -> Result<()> {
         // polkit can only show the policy's own message once the policy is
         // installed, so this one prompt (which installs it) is pkexec's
         // generic one for /bin/bash; every later run gets the policy's.
-        crate::applog::log("run_system_setup: installing the setup script and policy, then running it");
+        crate::applog::log(
+            "run_system_setup: installing the setup script and policy, then running it",
+        );
         let stage = Stage::new()?;
         let staged_script = stage.0.join("privileged-setup.sh");
         let staged_policy = stage.0.join("policy");
@@ -181,7 +184,11 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     let mut cmd = Command::new("winetricks");
     wine.apply(&mut cmd);
     cmd.args(WINETRICKS_ARGS);
-    let output = match launcher::run_with_timeout(cmd, WINETRICKS_TIMEOUT, "The .NET installer (winetricks)") {
+    let output = match launcher::run_with_timeout(
+        cmd,
+        WINETRICKS_TIMEOUT,
+        "The .NET installer (winetricks)",
+    ) {
         Ok(o) => o,
         Err(e) => {
             // Its wine processes and their wineserver (which runs in its own
@@ -203,8 +210,15 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     let mut wait = Command::new(wine.wineserver());
     wine.apply(&mut wait);
     wait.arg("-w");
-    let waited = launcher::run_with_timeout(wait, WINESERVER_EXIT_TIMEOUT, "Waiting for the installer's wineserver to exit");
-    crate::applog::log(&format!("install_dotnet48: wineserver -w -> {:?}", waited.as_ref().map(|o| o.status)));
+    let waited = launcher::run_with_timeout(
+        wait,
+        WINESERVER_EXIT_TIMEOUT,
+        "Waiting for the installer's wineserver to exit",
+    );
+    crate::applog::log(&format!(
+        "install_dotnet48: wineserver -w -> {:?}",
+        waited.as_ref().map(|o| o.status)
+    ));
     if let Err(e) = waited {
         stop_prefix_wine(&wine);
         bail!("{e} The prefix may be missing the last registry changes; run the setup again.");
@@ -233,8 +247,15 @@ fn stop_prefix_wine(wine: &ProtonWine) {
     let mut kill = Command::new(wine.wineserver());
     wine.apply(&mut kill);
     kill.arg("-k");
-    let r = launcher::run_with_timeout(kill, std::time::Duration::from_secs(30), "Stopping the installer's wine processes");
-    crate::applog::log(&format!("stop_prefix_wine: wineserver -k -> {:?}", r.map(|o| o.status)));
+    let r = launcher::run_with_timeout(
+        kill,
+        std::time::Duration::from_secs(30),
+        "Stopping the installer's wine processes",
+    );
+    crate::applog::log(&format!(
+        "stop_prefix_wine: wineserver -k -> {:?}",
+        r.map(|o| o.status)
+    ));
 }
 
 /// The last `n` lines of `text` — winetricks output runs to hundreds of
@@ -296,7 +317,8 @@ mod tests {
 
     #[test]
     fn manual_commands_match_the_automatic_setup() {
-        let dir = std::env::temp_dir().join(format!("steam-punk-setup-manual-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("steam-punk-setup-manual-{}", std::process::id()));
         let proton = dir.join("Proton - Experimental");
         std::fs::create_dir_all(proton.join("files/bin")).unwrap();
         std::fs::write(proton.join("files/bin/wine"), b"").unwrap();
@@ -308,7 +330,10 @@ mod tests {
         assert_eq!(lines.next(), Some("# Quit the game, then:"));
         let cmd = lines.next().unwrap();
         assert!(cmd.ends_with(" winetricks -q -f dotnet48 win10"), "{cmd}");
-        assert!(cmd.contains("WINEPREFIX='/mnt/My Games/steamapps/compatdata/1/pfx'"), "{cmd}");
+        assert!(
+            cmd.contains("WINEPREFIX='/mnt/My Games/steamapps/compatdata/1/pfx'"),
+            "{cmd}"
+        );
         let wine = format!("{}/files/bin/wine", proton.display());
         assert!(cmd.contains(&format!("WINE='{wine}'")), "{cmd}");
         assert!(cmd.contains(&format!("WINESERVER='{wine}server'")), "{cmd}");
@@ -317,7 +342,10 @@ mod tests {
         // The command really sets that environment when run by a shell.
         let out = Command::new("sh")
             .arg("-c")
-            .arg(cmd.replace(" winetricks -q -f dotnet48 win10", " sh -c 'printf %s \"$WINE|$PATH\"'"))
+            .arg(cmd.replace(
+                " winetricks -q -f dotnet48 win10",
+                " sh -c 'printf %s \"$WINE|$PATH\"'",
+            ))
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap();
@@ -327,7 +355,10 @@ mod tests {
         );
 
         let other = manual_commands(&target(&proton), false);
-        assert!(other.starts_with("# Install winetricks and cabextract"), "{other}");
+        assert!(
+            other.starts_with("# Install winetricks and cabextract"),
+            "{other}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -341,7 +372,9 @@ mod tests {
     fn the_privileged_script_runs_exactly_the_install_line() {
         let script = std::str::from_utf8(SCRIPT_BYTES).unwrap();
         assert!(
-            script.lines().any(|l| l.contains(&format!("if ! {APT_INSTALL} >>"))),
+            script
+                .lines()
+                .any(|l| l.contains(&format!("if ! {APT_INSTALL} >>"))),
             "privileged-setup.sh no longer runs `{APT_INSTALL}`"
         );
     }
@@ -356,7 +389,12 @@ mod tests {
                 .unwrap();
             child.stdin.take().unwrap().write_all(bytes).unwrap();
             let out = child.wait_with_output().unwrap();
-            assert_eq!(String::from_utf8_lossy(&out.stdout).split_whitespace().next(), Some(sum));
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .next(),
+                Some(sum)
+            );
         }
     }
 

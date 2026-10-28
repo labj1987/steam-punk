@@ -51,9 +51,9 @@ fn is_steam_url(url: &reqwest::Url) -> bool {
         && url.port().is_none()
         && url.username().is_empty()
         && url.password().is_none()
-        && url.host_str().is_some_and(|h| {
-            is_steam_cdn_host(h) || h == "store.steampowered.com"
-        })
+        && url
+            .host_str()
+            .is_some_and(|h| is_steam_cdn_host(h) || h == "store.steampowered.com")
 }
 
 /// Image URLs come from Steam API responses (`header_image`, `tiny_image`),
@@ -75,7 +75,11 @@ fn image_is_complete(bytes: &[u8]) -> bool {
         return false;
     }
     let tail = &bytes[bytes.len().saturating_sub(64)..];
-    let end_marker: &[u8] = if bytes.starts_with(b"\x89PNG") { b"IEND" } else { &[0xFF, 0xD9] };
+    let end_marker: &[u8] = if bytes.starts_with(b"\x89PNG") {
+        b"IEND"
+    } else {
+        &[0xFF, 0xD9]
+    };
     tail.windows(end_marker.len()).any(|w| w == end_marker)
 }
 
@@ -138,7 +142,8 @@ async fn fetch_and_cache_online(client: &reqwest::Client, appid: u32) -> Result<
     if cached_online(appid).is_some() {
         return Ok(());
     }
-    let url = format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=categories");
+    let url =
+        format!("https://store.steampowered.com/api/appdetails?appids={appid}&filters=categories");
     let body: serde_json::Value = client
         .get(&url)
         .send()
@@ -213,7 +218,9 @@ pub async fn fetch_and_cache(appid: u32) -> Result<()> {
         Err(e) => Err(e),
     };
     if let Err(e) = online {
-        crate::applog::log(&format!("gamedata: online-play lookup failed for AppID {appid}: {e}"));
+        crate::applog::log(&format!(
+            "gamedata: online-play lookup failed for AppID {appid}: {e}"
+        ));
     }
     result
 }
@@ -240,7 +247,9 @@ async fn fetch_name_and_cover(appid: u32) -> Result<()> {
                 header_image = details.header_image;
             }
             Err(e) if name.is_some() => {
-                crate::applog::log(&format!("gamedata: appdetails failed for AppID {appid}: {e}"));
+                crate::applog::log(&format!(
+                    "gamedata: appdetails failed for AppID {appid}: {e}"
+                ));
             }
             Err(e) => return Err(e),
         }
@@ -271,7 +280,9 @@ async fn fetch_name_and_cover(appid: u32) -> Result<()> {
         None => http_client()?,
     };
     if let Err(e) = fetch_cover(&client, appid, header_image.as_deref()).await {
-        crate::applog::log(&format!("gamedata: cover art fetch failed for AppID {appid}: {e}"));
+        crate::applog::log(&format!(
+            "gamedata: cover art fetch failed for AppID {appid}: {e}"
+        ));
     }
 
     Ok(())
@@ -386,7 +397,9 @@ fn image_size(path: &Path) -> Option<(u32, u32)> {
 fn pick_header(candidates: &[(PathBuf, u32, u32)]) -> Option<PathBuf> {
     candidates
         .iter()
-        .filter(|(_, w, h)| *h > 0 && *w <= 800 && (*w as f32 / *h as f32) >= 1.5 && (*w as f32 / *h as f32) <= 2.5)
+        .filter(|(_, w, h)| {
+            *h > 0 && *w <= 800 && (*w as f32 / *h as f32) >= 1.5 && (*w as f32 / *h as f32) <= 2.5
+        })
         .min_by_key(|(_, w, h)| w.abs_diff(460) + h.abs_diff(215))
         .map(|(p, _, _)| p.clone())
 }
@@ -534,7 +547,9 @@ async fn fetch_appdetails(client: &reqwest::Client, appid: u32) -> Result<AppDet
     let name = data
         .and_then(|v| v.get("name"))
         .and_then(|v| v.as_str())
-        .with_context(|| format!("appdetails response for AppID {appid} has no data.name — is the AppID valid?"))?
+        .with_context(|| {
+            format!("appdetails response for AppID {appid} has no data.name — is the AppID valid?")
+        })?
         .to_string();
 
     let header_image = data
@@ -550,7 +565,11 @@ async fn fetch_appdetails(client: &reqwest::Client, appid: u32) -> Result<AppDet
 /// it's the exact URL Steam's own store page serves for this AppID —
 /// `header_image` from the appdetails response already fetched in
 /// `fetch_and_cache`.
-async fn fetch_cover(client: &reqwest::Client, appid: u32, header_image: Option<&str>) -> Result<()> {
+async fn fetch_cover(
+    client: &reqwest::Client,
+    appid: u32,
+    header_image: Option<&str>,
+) -> Result<()> {
     let header_url = format!("https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg");
 
     let bytes = match download_image(client, &header_url).await {
@@ -582,7 +601,10 @@ pub(crate) async fn download_image(client: &reqwest::Client, url: &str) -> Resul
     if !is_image {
         anyhow::bail!("{url} did not return an image (wrong Content-Type)");
     }
-    if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES as u64) {
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_IMAGE_BYTES as u64)
+    {
         anyhow::bail!("{url} image is larger than {MAX_IMAGE_BYTES} bytes");
     }
     let bytes = resp.bytes().await?;
@@ -706,7 +728,8 @@ pub async fn search(term: &str) -> Result<Vec<SearchResult>> {
 pub fn guess_search_term(filename_stem: &str) -> String {
     let is_version_token = |word: &str| {
         let mut chars = word.chars();
-        matches!(chars.next(), Some('v') | Some('V')) && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        matches!(chars.next(), Some('v') | Some('V'))
+            && matches!(chars.next(), Some(c) if c.is_ascii_digit())
     };
 
     let words: Vec<&str> = filename_stem.split_whitespace().collect();
@@ -723,7 +746,11 @@ pub fn guess_search_term(filename_stem: &str) -> String {
     let mut words: Vec<&str> = stripped.split_whitespace().collect();
     // A stem with no version or count ("Some Game Trainer") keeps the word
     // "Trainer", which only hurts a title search or comparison.
-    if words.len() > 1 && words.last().is_some_and(|w| w.eq_ignore_ascii_case("trainer")) {
+    if words.len() > 1
+        && words
+            .last()
+            .is_some_and(|w| w.eq_ignore_ascii_case("trainer"))
+    {
         words.pop();
     }
     words.join(" ")
@@ -777,7 +804,10 @@ mod tests {
     fn bare_v_is_not_a_version_token() {
         // "V" with nothing after it (or a non-digit after it) must not
         // trigger the cut — only Roman-numeral-free digit versions do.
-        assert_eq!(guess_search_term("Grand Theft Auto V"), "Grand Theft Auto V");
+        assert_eq!(
+            guess_search_term("Grand Theft Auto V"),
+            "Grand Theft Auto V"
+        );
     }
 
     #[test]
@@ -807,9 +837,14 @@ mod tests {
     async fn live_fetch_cover_falls_back_to_appdetails_header_image() {
         let appid = 2852190;
         let _ = std::fs::remove_file(super::cover_cache_path(appid).unwrap());
-        super::fetch_and_cache(appid).await.expect("fetch_and_cache");
+        super::fetch_and_cache(appid)
+            .await
+            .expect("fetch_and_cache");
         let cover = super::cached_cover(appid);
-        assert!(cover.is_some(), "expected cover art to be cached after fallback");
+        assert!(
+            cover.is_some(),
+            "expected cover art to be cached after fallback"
+        );
         println!("cover cached at {:?}", cover.unwrap());
     }
 
@@ -822,7 +857,10 @@ mod tests {
         let term = guess_search_term("Schedule I Early Access v0.3.5f8 Plus 10 Trainer");
         assert_eq!(term, "Schedule I");
         let results = super::search(&term).await.expect("search");
-        assert!(!results.is_empty(), "expected at least one result for {term:?}");
+        assert!(
+            !results.is_empty(),
+            "expected at least one result for {term:?}"
+        );
         println!("results for {term:?}: {}", results.len());
         for r in &results {
             println!("  {} {}", r.appid, r.name);
@@ -936,7 +974,9 @@ mod tests {
     #[test]
     fn online_categories_are_parsed_from_appdetails() {
         let online = |s: &str| has_online_category(&serde_json::from_str(s).unwrap());
-        assert!(online(r#"{"categories":[{"id":2,"description":"Single-player"},{"id":36,"description":"Online PvP"}]}"#));
+        assert!(online(
+            r#"{"categories":[{"id":2,"description":"Single-player"},{"id":36,"description":"Online PvP"}]}"#
+        ));
         assert!(online(r#"{"categories":[{"id":38}]}"#));
         assert!(online(r#"{"categories":[{"id":20}]}"#));
         // Plain Multi-player (1) or local co-op does not count as online.
@@ -948,8 +988,14 @@ mod tests {
 
     #[test]
     fn reads_jpeg_and_png_dimensions() {
-        assert_eq!(super::image_dimensions(&fake_jpeg(600, 900)), Some((600, 900)));
-        assert_eq!(super::image_dimensions(&fake_png(1920, 620)), Some((1920, 620)));
+        assert_eq!(
+            super::image_dimensions(&fake_jpeg(600, 900)),
+            Some((600, 900))
+        );
+        assert_eq!(
+            super::image_dimensions(&fake_png(1920, 620)),
+            Some((1920, 620))
+        );
         assert_eq!(super::image_dimensions(b"GIF89a not supported"), None);
         assert_eq!(super::image_dimensions(&[0xFF, 0xD8, 0xFF]), None);
         assert_eq!(super::image_dimensions(&[]), None);
@@ -978,7 +1024,10 @@ mod tests {
         std::fs::write(dir.join("4e5f6a.jpg"), fake_jpeg(600, 900)).unwrap();
         std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
 
-        assert_eq!(super::local_cover(&s.0, 3240220), Some(dir.join("0a1b2c3d/library_header.jpg")));
+        assert_eq!(
+            super::local_cover(&s.0, 3240220),
+            Some(dir.join("0a1b2c3d/library_header.jpg"))
+        );
     }
 
     #[test]
@@ -991,8 +1040,14 @@ mod tests {
         std::fs::write(cache.join("43_header.jpg"), fake_jpeg(460, 215)).unwrap();
         std::fs::write(cache.join("420_library_600x900.jpg"), fake_jpeg(600, 900)).unwrap();
 
-        assert_eq!(super::local_cover(&s.0, 42), Some(cache.join("42_header.jpg")));
-        assert_eq!(super::local_cover(&s.0, 43), Some(cache.join("43_header.jpg")));
+        assert_eq!(
+            super::local_cover(&s.0, 42),
+            Some(cache.join("42_header.jpg"))
+        );
+        assert_eq!(
+            super::local_cover(&s.0, 43),
+            Some(cache.join("43_header.jpg"))
+        );
         assert_eq!(super::local_cover(&s.0, 420), None);
         assert_eq!(super::local_cover(&s.0, 44), None);
     }
@@ -1007,7 +1062,11 @@ mod tests {
         )
         .unwrap();
         std::fs::create_dir_all(s.0.join("appcache/librarycache/7")).unwrap();
-        std::fs::write(s.0.join("appcache/librarycache/7/x.jpg"), fake_jpeg(460, 215)).unwrap();
+        std::fs::write(
+            s.0.join("appcache/librarycache/7/x.jpg"),
+            fake_jpeg(460, 215),
+        )
+        .unwrap();
 
         let info = super::local_game_info_in(std::slice::from_ref(&s.0), 7);
         assert_eq!(info.name.as_deref(), Some("Seven"));
@@ -1035,7 +1094,10 @@ mod tests {
         assert_eq!(id("Elden Ring v1.16 Plus 25 Trainer"), Some(1245620));
         assert_eq!(id("Elden Ring Trainer"), Some(1245620));
         assert_eq!(id("Witcher 3 Wild Hunt v4.04 Plus 12 Trainer"), Some(1));
-        assert_eq!(id("Grand Theft Auto V Enhanced v1.0.811 Plus 22 Trainer"), Some(3240220));
+        assert_eq!(
+            id("Grand Theft Auto V Enhanced v1.0.811 Plus 22 Trainer"),
+            Some(3240220)
+        );
         assert_eq!(id("Hades II Early Access v1.0 Plus 5 Trainer"), Some(3));
         assert_eq!(id("Hades v1.38 Plus 8 Trainer"), Some(2));
     }
@@ -1043,12 +1105,18 @@ mod tests {
     #[test]
     fn suggests_nothing_when_unsure() {
         let g = games();
-        assert_eq!(super::suggest_installed("Crimson Desert v1.0 Plus 12 Trainer", &g), None);
+        assert_eq!(
+            super::suggest_installed("Crimson Desert v1.0 Plus 12 Trainer", &g),
+            None
+        );
         assert_eq!(super::suggest_installed("", &g), None);
         // Only the legacy game installed: the Enhanced trainer must not match it.
         let legacy_only = vec![(271590, "Grand Theft Auto V".to_string())];
         assert_eq!(
-            super::suggest_installed("Grand Theft Auto V Enhanced v1.0 Plus 22 Trainer", &legacy_only),
+            super::suggest_installed(
+                "Grand Theft Auto V Enhanced v1.0 Plus 22 Trainer",
+                &legacy_only
+            ),
             None
         );
         // Two different installs with the same title is ambiguous.

@@ -12,8 +12,9 @@ use gtk4::{
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Clamp, Dialog as AdwDialog,
-    ExpanderRow, HeaderBar, ResponseAppearance, StatusPage, Toast, ToastOverlay,
+    AboutDialog, ActionRow, AlertDialog, Application, ApplicationWindow, Clamp,
+    Dialog as AdwDialog, ExpanderRow, HeaderBar, ResponseAppearance, StatusPage, Toast,
+    ToastOverlay,
 };
 
 use std::cell::RefCell;
@@ -196,7 +197,9 @@ pub fn build_ui(app: &Application) {
             stack.set_visible_child_name("list");
 
             for trainer in trainers {
-                let row = ActionRow::builder().title(esc(trainer.display_name())).build();
+                let row = ActionRow::builder()
+                    .title(esc(trainer.display_name()))
+                    .build();
                 if let Some(appid) = trainer.appid {
                     row.set_tooltip_text(Some(&format!("Steam AppID {appid}")));
                 }
@@ -261,7 +264,14 @@ pub fn build_ui(app: &Application) {
                         .valign(Align::Center)
                         .build();
                     stop_btn.add_css_class("destructive-action");
-                    wire_stop_button(&stop_btn, trainer.path.clone(), pgid, running.clone(), self_slot.clone(), toast_overlay.clone());
+                    wire_stop_button(
+                        &stop_btn,
+                        trainer.path.clone(),
+                        pgid,
+                        running.clone(),
+                        self_slot.clone(),
+                        toast_overlay.clone(),
+                    );
                     row.add_suffix(&stop_btn);
                 } else {
                     let launch_btn = Button::builder()
@@ -269,7 +279,14 @@ pub fn build_ui(app: &Application) {
                         .valign(Align::Center)
                         .build();
                     launch_btn.add_css_class("suggested-action");
-                    wire_launch_button(&launch_btn, trainer.clone(), window.clone(), toast_overlay.clone(), running.clone(), self_slot.clone());
+                    wire_launch_button(
+                        &launch_btn,
+                        trainer.clone(),
+                        window.clone(),
+                        toast_overlay.clone(),
+                        running.clone(),
+                        self_slot.clone(),
+                    );
                     row.add_suffix(&launch_btn);
                 }
 
@@ -374,7 +391,9 @@ pub fn build_ui(app: &Application) {
                                     path.display()
                                 ));
                                 changed = true;
-                                if let Some(cause) = diagnosis.as_ref().and_then(|d| d.lines().next()) {
+                                if let Some(cause) =
+                                    diagnosis.as_ref().and_then(|d| d.lines().next())
+                                {
                                     toast_overlay.add_toast(toast(&format!(
                                         "Trainer exited right after launch. {cause}"
                                     )));
@@ -417,11 +436,19 @@ pub fn build_ui(app: &Application) {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
                 let result = library::import_trainer(&path);
-                applog::log(&format!("UI: import_trainer({}) -> {result:?}", path.display()));
+                applog::log(&format!(
+                    "UI: import_trainer({}) -> {result:?}",
+                    path.display()
+                ));
                 match result {
                     Ok(dest) => {
                         let queue = Rc::new(RefCell::new(vec![dest]));
-                        prompt_appid_for_queue(window2.clone(), queue, refresh_list.clone(), toast_overlay.clone());
+                        prompt_appid_for_queue(
+                            window2.clone(),
+                            queue,
+                            refresh_list.clone(),
+                            toast_overlay.clone(),
+                        );
                     }
                     Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
                 }
@@ -455,7 +482,12 @@ pub fn build_ui(app: &Application) {
             let imported_any = !imported.is_empty();
             if imported_any {
                 let queue = Rc::new(RefCell::new(imported));
-                prompt_appid_for_queue(window.clone(), queue, refresh_list.clone(), toast_overlay.clone());
+                prompt_appid_for_queue(
+                    window.clone(),
+                    queue,
+                    refresh_list.clone(),
+                    toast_overlay.clone(),
+                );
             }
             imported_any
         });
@@ -480,7 +512,10 @@ pub fn build_ui(app: &Application) {
                      Steam game's wine session.",
                 )
                 .build();
-            dialog.add_credit_section(Some("Built with"), &["Claude Code (Anthropic)", "Codex (OpenAI)"]);
+            dialog.add_credit_section(
+                Some("Built with"),
+                &["Claude Code (Anthropic)", "Codex (OpenAI)"],
+            );
             dialog.present(Some(&window));
         });
     }
@@ -659,13 +694,16 @@ fn prompt_appid_for_queue(
                 picture.set_valign(Align::Center);
                 picture.add_css_class("card");
                 row.add_prefix(&picture);
-                spawn_async(async move { gamedata::fetch_thumbnail(&url).await }, move |bytes| {
-                    let Ok(bytes) = bytes else { return };
-                    let gbytes = glib::Bytes::from(&bytes);
-                    if let Ok(texture) = gdk4::Texture::from_bytes(&gbytes) {
-                        picture.set_paintable(Some(&texture));
-                    }
-                });
+                spawn_async(
+                    async move { gamedata::fetch_thumbnail(&url).await },
+                    move |bytes| {
+                        let Ok(bytes) = bytes else { return };
+                        let gbytes = glib::Bytes::from(&bytes);
+                        if let Ok(texture) = gdk4::Texture::from_bytes(&gbytes) {
+                            picture.set_paintable(Some(&texture));
+                        }
+                    },
+                );
             }
 
             let use_btn = Button::builder().label("Use").valign(Align::Center).build();
@@ -706,28 +744,31 @@ fn prompt_appid_for_queue(
             let build_result_row = build_result_row.clone();
             let top_result = top_result.clone();
             let term_for_check = term.clone();
-            spawn_async(async move { gamedata::search(&term).await }, move |results| {
-                if search_entry.text().as_str() != term_for_check {
-                    return;
-                }
-                while let Some(c) = results_list.first_child() {
-                    results_list.remove(&c);
-                }
-                match results {
-                    Ok(results) => {
-                        *top_result.borrow_mut() = results.first().map(|r| r.appid);
-                        for result in results {
-                            results_list.append(&build_result_row(result));
+            spawn_async(
+                async move { gamedata::search(&term).await },
+                move |results| {
+                    if search_entry.text().as_str() != term_for_check {
+                        return;
+                    }
+                    while let Some(c) = results_list.first_child() {
+                        results_list.remove(&c);
+                    }
+                    match results {
+                        Ok(results) => {
+                            *top_result.borrow_mut() = results.first().map(|r| r.appid);
+                            for result in results {
+                                results_list.append(&build_result_row(result));
+                            }
+                        }
+                        Err(e) => {
+                            *top_result.borrow_mut() = None;
+                            applog::log(&format!(
+                                "gamedata: search failed for {term_for_check:?}: {e}"
+                            ));
                         }
                     }
-                    Err(e) => {
-                        *top_result.borrow_mut() = None;
-                        applog::log(&format!(
-                            "gamedata: search failed for {term_for_check:?}: {e}"
-                        ));
-                    }
-                }
-            });
+                },
+            );
         })
     };
 
@@ -743,15 +784,13 @@ fn prompt_appid_for_queue(
             let term = entry.text().to_string();
             let run_search = run_search.clone();
             let slot = pending.clone();
-            let id = glib::timeout_add_local_once(
-                std::time::Duration::from_millis(250),
-                move || {
+            let id =
+                glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
                     // The source is spent once it fires; forget its id so a
                     // later keystroke doesn't try to remove it.
                     slot.borrow_mut().take();
                     run_search(term);
-                },
-            );
+                });
             *pending.borrow_mut() = Some(id);
         });
     }
@@ -789,10 +828,14 @@ fn prompt_appid_for_queue(
                 .await
             },
             move |result| {
-                let Ok(Some((appid, name))) = result else { return };
+                let Ok(Some((appid, name))) = result else {
+                    return;
+                };
                 let row = ActionRow::builder()
                     .title(esc(&name))
-                    .subtitle(format!("Suggested from your installed games, AppID {appid}"))
+                    .subtitle(format!(
+                        "Suggested from your installed games, AppID {appid}"
+                    ))
                     .activatable(true)
                     .build();
                 let use_btn = Button::builder().label("Use").valign(Align::Center).build();
@@ -900,9 +943,7 @@ fn resolve_target_then(
 ) {
     let toast_overlay = toast_overlay.clone();
     spawn_async(
-        async move {
-            tokio::task::spawn_blocking(move || launcher::resolve_launch_target(appid)).await
-        },
+        async move { tokio::task::spawn_blocking(move || launcher::resolve_launch_target(appid)).await },
         move |result| match result {
             Ok(Ok(target)) => proceed(target),
             Ok(Err(e)) => toast_overlay.add_toast(toast(&e.to_string())),
@@ -1038,10 +1079,23 @@ fn wire_launch_button(
                             let window = dialog_window.clone();
                             let proceed: Box<dyn FnOnce()> = Box::new(move || {
                                 if usable {
-                                    launch_trainer_now(target, trainer, toasts, running, refresh_slot, guard)
+                                    launch_trainer_now(
+                                        target,
+                                        trainer,
+                                        toasts,
+                                        running,
+                                        refresh_slot,
+                                        guard,
+                                    )
                                 } else {
                                     show_dotnet_dialog(
-                                        &window, target, trainer, toasts, running, refresh_slot, guard,
+                                        &window,
+                                        target,
+                                        trainer,
+                                        toasts,
+                                        running,
+                                        refresh_slot,
+                                        guard,
                                         &health,
                                     )
                                 }
@@ -1127,7 +1181,9 @@ fn launch_trainer_now(
                 }
             }
             Ok(Err(e)) => {
-                launcher::record_failure(&format!("Could not start the trainer through Proton: {e:#}"));
+                launcher::record_failure(&format!(
+                    "Could not start the trainer through Proton: {e:#}"
+                ));
                 toast_overlay2.add_toast(toast(&format!("Launch failed: {e}")));
             }
             Err(e) => toast_overlay2.add_toast(toast(&format!("Task error: {e}"))),
@@ -1213,7 +1269,11 @@ commands below yourself, then launch the trainer again."
     commands_label.set_margin_end(12);
 
     let expander = ExpanderRow::builder()
-        .title(if automatic { "Show manual commands instead" } else { "Manual commands" })
+        .title(if automatic {
+            "Show manual commands instead"
+        } else {
+            "Manual commands"
+        })
         .expanded(!automatic)
         .build();
     expander.add_row(&commands_label);
