@@ -4,6 +4,14 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.7.1 — 2026-10-28
+
+- Error notifications no longer come up empty when the message contains `<` or `&`. Wine's
+  output is full of them (for example `<null>`), so a failed .NET setup or launch could show a
+  blank notification, and a trainer named something like "Mount & Blade" did the same.
+- Stopping a trainer and launching it again right away no longer loses its Stop button (and no
+  longer lets it be launched twice).
+
 ## 0.7.0 — 2026-10-11
 
 - The one-time .NET setup no longer breaks when it has to fall back to Microsoft's installer.
