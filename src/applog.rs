@@ -46,7 +46,11 @@ pub fn log(msg: &str) {
         return;
     }
     let _guard = LOCK.lock().unwrap();
-    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path()) else {
+    let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path())
+    else {
         return;
     };
     let _ = writeln!(f, "{line}");

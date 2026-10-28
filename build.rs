@@ -7,7 +7,10 @@ use std::process::Command;
 fn main() {
     for (var, path) in [
         ("SP_SETUP_SCRIPT_SHA256", "scripts/privileged-setup.sh"),
-        ("SP_SETUP_POLICY_SHA256", "data/io.github.labj1987.SteamPunk.setup.policy"),
+        (
+            "SP_SETUP_POLICY_SHA256",
+            "data/io.github.labj1987.SteamPunk.setup.policy",
+        ),
     ] {
         println!("cargo:rerun-if-changed={path}");
         let out = Command::new("sha256sum")

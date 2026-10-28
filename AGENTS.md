@@ -186,20 +186,26 @@ checkout:
    runners). A missing or failing `zsyncmake` is fatal when `CI` is set (a
    release without the sidecar cannot update); a local build only warns.
 
+## Formatting
+
+Run `cargo fmt --all` before every commit; CI runs `cargo fmt --all -- --check`. The one-off
+formatting commit is listed in `.git-blame-ignore-revs`; to have local `git blame` skip it, run
+`git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
 ## Release process
 
 1. Bump `version` in `Cargo.toml`.
 2. Add a `CHANGELOG.md` entry (see Changelog below).
 3. Run `python3 scripts/sync_appdata_releases.py` to regenerate the
    appdata `<releases>` list; CI (`.github/workflows/ci.yml`, on every push
-   to `main` and every pull request: build, test, clippy, shellcheck and the
+   to `main` and every pull request: rustfmt check, build, test, clippy, shellcheck and the
    changelog checks) and the release workflow fail if it is out of
    date.
-4. Commit, push to `main`.
+4. Run `cargo fmt --all` (CI fails on unformatted code), then commit and push to `main`.
 5. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The tag push triggers `.github/workflows/release.yml` ("Build and
    Release"). It first runs the whole of `ci.yml` (called as a reusable
-   workflow: build, tests, clippy with `-D warnings`, shellcheck, the
+   workflow: rustfmt check, build, tests, clippy with `-D warnings`, shellcheck, the
    changelog and AppStream checks) on the tagged commit. Only then does its
    `build` job, with a read-only token, check the tag matches `Cargo.toml`
    and the changelog and run `build-appimage.sh`. A separate `publish` job, the only one with write

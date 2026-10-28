@@ -67,7 +67,10 @@ fn load_meta_from(path: &Path) -> Result<HashMap<String, TrainerMeta>> {
 /// Read-modify-write of the associations. Refuses (with the parse error)
 /// when the existing file is unreadable, and replaces it atomically
 /// otherwise, so an interrupted save can't leave a torn file behind.
-fn update_meta_at(path: &Path, change: impl FnOnce(&mut HashMap<String, TrainerMeta>) -> bool) -> Result<()> {
+fn update_meta_at(
+    path: &Path,
+    change: impl FnOnce(&mut HashMap<String, TrainerMeta>) -> bool,
+) -> Result<()> {
     let mut meta = load_meta_from(path)?;
     if !change(&mut meta) {
         return Ok(());
@@ -116,7 +119,10 @@ pub fn list_trainers() -> Result<Listing> {
         }
     };
     if !dir.is_dir() {
-        return Ok(Listing { trainers: Vec::new(), meta_error });
+        return Ok(Listing {
+            trainers: Vec::new(),
+            meta_error,
+        });
     }
 
     let mut trainers: Vec<Trainer> = std::fs::read_dir(&dir)?
@@ -156,7 +162,10 @@ pub fn list_trainers() -> Result<Listing> {
         .collect();
 
     trainers.sort_by(|a, b| a.display_name().cmp(b.display_name()));
-    Ok(Listing { trainers, meta_error })
+    Ok(Listing {
+        trainers,
+        meta_error,
+    })
 }
 
 /// Trainers are Windows executables; the list only ever shows `.exe` files.
@@ -176,9 +185,7 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
     let dir = trainers_dir()?;
     std::fs::create_dir_all(&dir)?;
 
-    let filename = src
-        .file_name()
-        .context("dropped file has no filename")?;
+    let filename = src.file_name().context("dropped file has no filename")?;
     let dest = dir.join(filename);
 
     // Re-importing a file that already is the library copy: copying onto
@@ -196,8 +203,11 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
     let tmp = PathBuf::from(tmp_name);
     if let Err(e) = std::fs::copy(src, &tmp).and_then(|_| std::fs::rename(&tmp, &dest)) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::new(e)
-            .context(format!("copying {} to {}", src.display(), dest.display())));
+        return Err(anyhow::Error::new(e).context(format!(
+            "copying {} to {}",
+            src.display(),
+            dest.display()
+        )));
     }
     Ok(dest)
 }
@@ -209,8 +219,12 @@ pub fn remove_trainer(path: &Path) -> Result<()> {
     // doesn't inherit a stale one. The trainer itself is already gone, so a
     // failure here is only logged (an unreadable trainers.json is kept as is).
     if let Some(filename) = path.file_name().map(|n| n.to_string_lossy().into_owned()) {
-        if let Err(e) = meta_path().and_then(|p| update_meta_at(&p, |meta| meta.remove(&filename).is_some())) {
-            crate::applog::log(&format!("remove_trainer: could not drop the AppID for {filename}: {e:#}"));
+        if let Err(e) =
+            meta_path().and_then(|p| update_meta_at(&p, |meta| meta.remove(&filename).is_some()))
+        {
+            crate::applog::log(&format!(
+                "remove_trainer: could not drop the AppID for {filename}: {e:#}"
+            ));
         }
     }
     Ok(())

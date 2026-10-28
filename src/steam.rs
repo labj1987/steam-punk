@@ -124,7 +124,8 @@ fn acf_field(contents: &str, key: &str) -> Option<String> {
 }
 
 fn manifest_path(lib: &Path, appid: &str) -> PathBuf {
-    lib.join("steamapps").join(format!("appmanifest_{appid}.acf"))
+    lib.join("steamapps")
+        .join(format!("appmanifest_{appid}.acf"))
 }
 
 /// The game's display name from its appmanifest, used to tell several running
@@ -233,8 +234,14 @@ mod tests {
 
     #[test]
     fn acf_name_is_the_top_level_field() {
-        assert_eq!(acf_field(ACF, "name").as_deref(), Some("Grand Theft Auto V Enhanced"));
-        assert_eq!(acf_field(ACF, "installdir").as_deref(), Some("Grand Theft Auto V Enhanced"));
+        assert_eq!(
+            acf_field(ACF, "name").as_deref(),
+            Some("Grand Theft Auto V Enhanced")
+        );
+        assert_eq!(
+            acf_field(ACF, "installdir").as_deref(),
+            Some("Grand Theft Auto V Enhanced")
+        );
         assert_eq!(acf_field(ACF, "missing"), None);
     }
 
@@ -262,13 +269,17 @@ mod tests {
         let lib_a = s.0.join("a");
         let lib_b = s.0.join("b");
         std::fs::create_dir_all(lib_a.join("steamapps")).unwrap();
-        std::fs::create_dir_all(lib_b.join("steamapps/common/Grand Theft Auto V Enhanced")).unwrap();
+        std::fs::create_dir_all(lib_b.join("steamapps/common/Grand Theft Auto V Enhanced"))
+            .unwrap();
         std::fs::write(lib_b.join("steamapps/appmanifest_3240220.acf"), ACF).unwrap();
         std::fs::write(lib_b.join("steamapps/appmanifest_notanumber.acf"), ACF).unwrap();
         std::fs::write(lib_a.join("steamapps/appmanifest_7.acf"), "not a manifest").unwrap();
 
         let libs = vec![lib_a, lib_b.clone()];
-        assert_eq!(game_name(&libs, "3240220").as_deref(), Some("Grand Theft Auto V Enhanced"));
+        assert_eq!(
+            game_name(&libs, "3240220").as_deref(),
+            Some("Grand Theft Auto V Enhanced")
+        );
         assert_eq!(game_name(&libs, "999"), None);
         assert_eq!(
             game_install_dir(&libs, "3240220"),
@@ -287,7 +298,8 @@ mod tests {
         std::fs::create_dir_all(native.join("steamapps")).unwrap();
         std::fs::create_dir_all(s.0.join(".steam")).unwrap();
         std::os::unix::fs::symlink(&native, s.0.join(".steam/steam")).unwrap();
-        let flatpak = s.0.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+        let flatpak =
+            s.0.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
         std::fs::create_dir_all(flatpak.join("steamapps")).unwrap();
 
         assert_eq!(metadata_roots_in(&s.0), vec![native, flatpak]);
