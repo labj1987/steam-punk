@@ -368,12 +368,11 @@ pub fn build_ui(app: &Application) {
                         for (path, pgid, diagnosis) in &exited {
                             // Only if it's still the same launch (not stopped
                             // and relaunched while the scan ran).
-                            if r.get(path) == Some(pgid) {
+                            if untrack(&mut r, path, *pgid) {
                                 applog::log(&format!(
                                     "UI: trainer at {} exited on its own",
                                     path.display()
                                 ));
-                                r.remove(path);
                                 changed = true;
                                 if let Some(cause) = diagnosis.as_ref().and_then(|d| d.lines().next()) {
                                     toast_overlay.add_toast(toast(&format!(
@@ -951,6 +950,22 @@ fn show_game_picker(
 
 type RunningMap = Rc<RefCell<std::collections::HashMap<std::path::PathBuf, u32>>>;
 
+/// Stops tracking `path`'s launch `pgid`, but only if that is still the
+/// launch tracked for it: a trainer stopped (or gone) and launched again
+/// meanwhile keeps its new launch. True when it was removed.
+fn untrack(
+    running: &mut std::collections::HashMap<std::path::PathBuf, u32>,
+    path: &std::path::Path,
+    pgid: u32,
+) -> bool {
+    if running.get(path) == Some(&pgid) {
+        running.remove(path);
+        true
+    } else {
+        false
+    }
+}
+
 /// Marks a trainer as "launch pending" (pgid 0 in `running`) from the moment
 /// Launch is clicked, so a second click before the launch resolves is a no-op
 /// instead of starting a second, untracked process. The marker is removed when
@@ -1146,7 +1161,10 @@ fn wire_stop_button(
                 } else {
                     toast_overlay.add_toast(toast("Trainer stopped"));
                 }
-                running.borrow_mut().remove(&trainer_path);
+                // The poll may have dropped the exited group already and the
+                // trainer been launched again before this ran: that new
+                // launch stays tracked.
+                untrack(&mut running.borrow_mut(), &trainer_path, pgid);
                 if let Some(refresh) = refresh_slot.borrow().clone() {
                     refresh();
                 }
@@ -1408,4 +1426,30 @@ fn run_installer(
             Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::untrack;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn stopping_a_launch_leaves_a_newer_one_tracked() {
+        let path = PathBuf::from("/trainers/a.exe");
+        let mut running = HashMap::from([(path.clone(), 200)]);
+        // Stop of the old launch (pgid 100) finishing after a relaunch.
+        assert!(!untrack(&mut running, &path, 100));
+        assert_eq!(
+            running.get(&path),
+            Some(&200),
+            "the new launch stays tracked"
+        );
+        assert!(untrack(&mut running, &path, 200));
+        assert!(running.is_empty());
+        assert!(
+            !untrack(&mut running, &path, 200),
+            "nothing tracked: nothing removed"
+        );
+    }
 }
