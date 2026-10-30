@@ -138,7 +138,7 @@ fn find_game_wineserver(compatdata_dir: &Path) -> Option<GameServer> {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        let Ok(exe_target) = std::fs::read_link(entry.path().join("exe")) else {
+        let Some(exe_target) = proc_exe(&entry.path()) else {
             continue;
         };
         let normalized_exe = normalize_lexical(&exe_target);
@@ -199,6 +199,21 @@ fn proton_dir_from_wineserver_exe(normalized_exe: &Path) -> Option<PathBuf> {
 /// The directory a Proton build keeps its wine in: `files/` since Proton 9,
 /// `dist/` before.
 const PROTON_DIST_DIRS: [&str; 2] = ["files", "dist"];
+
+/// The executable a `/proc/<pid>` entry runs. When its file was replaced or removed after it
+/// started (Steam updated the Proton build while the game runs), the kernel appends " (deleted)"
+/// to the link: the path it ran from is the part before.
+fn proc_exe(proc_entry: &Path) -> Option<PathBuf> {
+    let link = std::fs::read_link(proc_entry.join("exe")).ok()?;
+    Some(strip_deleted(link))
+}
+
+fn strip_deleted(link: PathBuf) -> PathBuf {
+    match link.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(path) => PathBuf::from(path),
+        None => link,
+    }
+}
 
 /// Resolve `..`/`.` components without touching the filesystem (no
 /// canonicalize — components may not all exist, and we don't want symlink
@@ -719,7 +734,7 @@ pub fn prefix_in_use(prefix: &Path) -> bool {
     };
     entries.flatten().any(|entry| {
         entry.file_name().to_string_lossy().parse::<u32>().is_ok()
-            && std::fs::read_link(entry.path().join("exe")).is_ok_and(|exe| {
+            && proc_exe(&entry.path()).is_some_and(|exe| {
                 normalize_lexical(&exe)
                     .to_string_lossy()
                     .ends_with("/wineserver")
@@ -1516,7 +1531,18 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)?.flatten() {
         let src = entry.path();
         let dst = to.join(entry.file_name());
-        if src.is_dir() {
+        // The entry's own type, not its target's: a symlink is copied as a link, so a link
+        // pointing back up the tree cannot recurse without end.
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            let target = std::fs::read_link(&src)?;
+            match std::fs::remove_file(&dst) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            std::os::unix::fs::symlink(&target, &dst)?;
+        } else if file_type.is_dir() {
             copy_dir_all(&src, &dst)?;
         } else {
             // Replaces rather than writes through: a re-clone hits the read-only files
@@ -1775,6 +1801,47 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_replaced_executable_is_still_recognised() {
+        assert_eq!(
+            strip_deleted(PathBuf::from(
+                "/steam/common/Proton 9.0/files/bin/wineserver (deleted)"
+            )),
+            PathBuf::from("/steam/common/Proton 9.0/files/bin/wineserver")
+        );
+        assert_eq!(
+            strip_deleted(PathBuf::from(
+                "/steam/common/Proton 9.0/files/bin/wineserver"
+            )),
+            PathBuf::from("/steam/common/Proton 9.0/files/bin/wineserver")
+        );
+    }
+
+    /// A donor tree holding a link back up to itself is copied with the link as a link: following
+    /// it recursed until the stack ran out. A dangling link is copied too, not an error halfway.
+    #[test]
+    fn cloning_a_tree_copies_its_links_as_links() {
+        let scratch = Scratch::new("clone-links");
+        let from = scratch.0.join("from");
+        std::fs::create_dir_all(from.join("v4.0")).unwrap();
+        std::fs::write(from.join("v4.0/clr.dll"), b"clr").unwrap();
+        std::os::unix::fs::symlink("..", from.join("v4.0/up")).unwrap();
+        std::os::unix::fs::symlink("missing.dll", from.join("dangling.dll")).unwrap();
+        let to = scratch.0.join("to");
+        copy_dir_all(&from, &to).expect("the tree is cloned");
+        assert_eq!(std::fs::read(to.join("v4.0/clr.dll")).unwrap(), b"clr");
+        assert_eq!(
+            std::fs::read_link(to.join("v4.0/up")).unwrap(),
+            PathBuf::from("..")
+        );
+        assert_eq!(
+            std::fs::read_link(to.join("dangling.dll")).unwrap(),
+            PathBuf::from("missing.dll")
+        );
+        // Cloned again over the first copy (the repair runs again): the links are replaced.
+        copy_dir_all(&from, &to).expect("the tree is cloned again");
     }
 
     #[test]
