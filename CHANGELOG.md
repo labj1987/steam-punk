@@ -4,6 +4,21 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.7.2 — 2026-10-30
+
+- Removing a trainer while it is running is refused, with a note to stop it first, instead of
+  leaving it running without a Stop button.
+- Starting a second .NET setup for a game whose setup is already running is refused instead of
+  running two at once in the same prefix.
+- Importing trainers (by the button or by dropping files) no longer freezes the window while
+  large files are copied.
+- A game whose Wine server binary was updated while it ran is still recognised as running, so
+  setup no longer touches its prefix while it is open.
+- Copying a game's prefix keeps its links as links, instead of failing on a link that points
+  back up the tree or nowhere.
+- A game whose online-play information couldn't be fetched is looked up again next time,
+  instead of being shown without it until its cover changes.
+
 ## 0.7.1 — 2026-10-28
 
 - Error notifications no longer come up empty when the message contains `<` or `&`. Wine's

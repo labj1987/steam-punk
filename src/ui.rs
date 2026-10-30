@@ -227,7 +227,9 @@ pub fn build_ui(app: &Application) {
                 // fetch_and_cache only runs at association time. Retry once
                 // per AppID per session whenever either is absent.
                 if let Some(appid) = trainer.appid {
-                    if (trainer.game_name.is_none() || trainer.cover_path.is_none())
+                    if (trainer.game_name.is_none()
+                        || trainer.cover_path.is_none()
+                        || gamedata::cached_online(appid).is_none())
                         && cover_retry_attempted.borrow_mut().insert(appid)
                     {
                         let refresh = self_slot.clone();
@@ -300,7 +302,15 @@ pub fn build_ui(app: &Application) {
                     let trainer = trainer.clone();
                     let toast_overlay = toast_overlay.clone();
                     let self_slot = self_slot.clone();
+                    let running = running.clone();
                     remove_btn.connect_clicked(move |_| {
+                        // A running (or launching) trainer keeps its row: with it gone there
+                        // would be no Stop for the process, and a pending launch would run a
+                        // deleted file.
+                        if running.borrow().contains_key(&trainer.path) {
+                            toast_overlay.add_toast(toast("Stop the trainer before removing it"));
+                            return;
+                        }
                         if let Err(e) = library::remove_trainer(&trainer.path) {
                             toast_overlay.add_toast(toast(&format!("Remove failed: {e}")));
                             return;
@@ -435,23 +445,12 @@ pub fn build_ui(app: &Application) {
             dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
-                let result = library::import_trainer(&path);
-                applog::log(&format!(
-                    "UI: import_trainer({}) -> {result:?}",
-                    path.display()
-                ));
-                match result {
-                    Ok(dest) => {
-                        let queue = Rc::new(RefCell::new(vec![dest]));
-                        prompt_appid_for_queue(
-                            window2.clone(),
-                            queue,
-                            refresh_list.clone(),
-                            toast_overlay.clone(),
-                        );
-                    }
-                    Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
-                }
+                import_off_main_thread(
+                    vec![path],
+                    window2.clone(),
+                    refresh_list.clone(),
+                    toast_overlay.clone(),
+                );
             });
         });
     }
@@ -468,28 +467,22 @@ pub fn build_ui(app: &Application) {
             let Ok(file_list) = value.get::<gdk4::FileList>() else {
                 return false;
             };
-            let mut imported: Vec<std::path::PathBuf> = Vec::new();
-            for file in file_list.files() {
-                let Some(path) = file.path() else { continue };
-                if !library::is_exe(&path) {
-                    continue;
-                }
-                match library::import_trainer(&path) {
-                    Ok(dest) => imported.push(dest),
-                    Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
-                }
+            let paths: Vec<std::path::PathBuf> = file_list
+                .files()
+                .iter()
+                .filter_map(|file| file.path())
+                .filter(|path| library::is_exe(path))
+                .collect();
+            if paths.is_empty() {
+                return false;
             }
-            let imported_any = !imported.is_empty();
-            if imported_any {
-                let queue = Rc::new(RefCell::new(imported));
-                prompt_appid_for_queue(
-                    window.clone(),
-                    queue,
-                    refresh_list.clone(),
-                    toast_overlay.clone(),
-                );
-            }
-            imported_any
+            import_off_main_thread(
+                paths,
+                window.clone(),
+                refresh_list.clone(),
+                toast_overlay.clone(),
+            );
+            true
         });
         content.add_controller(drop_target);
     }
@@ -1027,6 +1020,78 @@ impl Drop for PendingLaunch {
 }
 type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
+/// Imports trainers off the GTK thread (a copy of a large file, or from a slow mount, would
+/// freeze the window), then asks for the AppIDs of those that came in.
+fn import_off_main_thread(
+    paths: Vec<std::path::PathBuf>,
+    window: ApplicationWindow,
+    refresh_list: Rc<dyn Fn()>,
+    toast_overlay: ToastOverlay,
+) {
+    spawn_async(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                paths
+                    .into_iter()
+                    .map(|path| {
+                        let result = library::import_trainer(&path);
+                        (path, result)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+        },
+        move |results| {
+            let Ok(results) = results else {
+                toast_overlay.add_toast(toast("Import failed: the import task ended unexpectedly"));
+                return;
+            };
+            let mut imported = Vec::new();
+            for (path, result) in results {
+                applog::log(&format!(
+                    "UI: import_trainer({}) -> {result:?}",
+                    path.display()
+                ));
+                match result {
+                    Ok(dest) => imported.push(dest),
+                    Err(e) => toast_overlay.add_toast(toast(&format!("Import failed: {e}"))),
+                }
+            }
+            if !imported.is_empty() {
+                prompt_appid_for_queue(
+                    window,
+                    Rc::new(RefCell::new(imported)),
+                    refresh_list,
+                    toast_overlay,
+                );
+            }
+        },
+    );
+}
+
+thread_local! {
+    /// The prefixes a .NET setup (clone or installer) is working on.
+    static REPAIRING: RefCell<std::collections::HashSet<std::path::PathBuf>> = RefCell::default();
+}
+
+/// One .NET setup at a time per prefix: two trainers of one game share it, and two setups
+/// copying into it (or the installer over a clone) would leave it half done.
+struct PrefixRepair(std::path::PathBuf);
+
+impl PrefixRepair {
+    fn begin(prefix: std::path::PathBuf) -> Option<Self> {
+        REPAIRING
+            .with(|r| r.borrow_mut().insert(prefix.clone()))
+            .then_some(Self(prefix))
+    }
+}
+
+impl Drop for PrefixRepair {
+    fn drop(&mut self) {
+        REPAIRING.with(|r| r.borrow_mut().remove(&self.0));
+    }
+}
+
 fn wire_launch_button(
     btn: &Button,
     trainer: Trainer,
@@ -1357,6 +1422,10 @@ fn run_automatic_setup(
     refresh_slot: RefreshSlot,
     guard: Rc<PendingLaunch>,
 ) {
+    let Some(repair) = PrefixRepair::begin(target.prefix_dir()) else {
+        toast_overlay.add_toast(toast("A .NET setup for this game is already running"));
+        return;
+    };
     toast_overlay.add_toast(toast("Setting up .NET — this may take a minute or two…"));
 
     spawn_async(
@@ -1376,15 +1445,19 @@ fn run_automatic_setup(
             })
             .await
         },
-        move |result| match result {
-            Ok(Ok(CloneOutcome::Ready(target))) => {
-                launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard)
+        move |result| {
+            // Held until the result is handled: no other setup starts on this prefix meanwhile.
+            let _repair = repair;
+            match result {
+                Ok(Ok(CloneOutcome::Ready(target))) => {
+                    launch_trainer_now(target, trainer, toast_overlay, running, refresh_slot, guard)
+                }
+                Ok(Ok(CloneOutcome::NoDonor(target))) => {
+                    show_quit_game_dialog(&window, target, toast_overlay, guard, false)
+                }
+                Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
+                Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
             }
-            Ok(Ok(CloneOutcome::NoDonor(target))) => {
-                show_quit_game_dialog(&window, target, toast_overlay, guard, false)
-            }
-            Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
-            Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
@@ -1448,6 +1521,10 @@ fn run_installer(
     toast_overlay: ToastOverlay,
     guard: Rc<PendingLaunch>,
 ) {
+    let Some(repair) = PrefixRepair::begin(target.prefix_dir()) else {
+        toast_overlay.add_toast(toast("A .NET setup for this game is already running"));
+        return;
+    };
     toast_overlay.add_toast(toast("Installing .NET — this takes a few minutes…"));
     spawn_async(
         async move {
@@ -1475,22 +1552,43 @@ fn run_installer(
             })
             .await
         },
-        move |result| match result {
-            Ok(Ok(InstallOutcome::Done)) => toast_overlay.add_toast(toast(
-                ".NET is installed. Start the game again, then launch the trainer.",
-            )),
-            Ok(Ok(InstallOutcome::StillRunning(target))) => {
-                show_quit_game_dialog(&window, target, toast_overlay, guard, true)
+        move |result| {
+            // Released first: the quit-game dialog's Install starts a setup of its own.
+            drop(repair);
+            match result {
+                Ok(Ok(InstallOutcome::Done)) => toast_overlay.add_toast(toast(
+                    ".NET is installed. Start the game again, then launch the trainer.",
+                )),
+                Ok(Ok(InstallOutcome::StillRunning(target))) => {
+                    show_quit_game_dialog(&window, target, toast_overlay, guard, true)
+                }
+                Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
+                Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
             }
-            Ok(Err(e)) => toast_overlay.add_toast(toast(&format!("Setup failed: {e:#}"))),
-            Err(e) => toast_overlay.add_toast(toast(&format!("Task error: {e}"))),
         },
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::untrack;
+    use super::{untrack, PrefixRepair};
+
+    #[test]
+    fn one_dotnet_setup_at_a_time_per_prefix() {
+        let a = PathBuf::from("/compatdata/1/pfx");
+        let first = PrefixRepair::begin(a.clone()).expect("the first setup starts");
+        assert!(
+            PrefixRepair::begin(a.clone()).is_none(),
+            "a second one on the same prefix does not"
+        );
+        let other = PrefixRepair::begin(PathBuf::from("/compatdata/2/pfx"));
+        assert!(other.is_some(), "another game's prefix is independent");
+        drop(first);
+        assert!(
+            PrefixRepair::begin(a).is_some(),
+            "free again once the first has finished"
+        );
+    }
     use std::collections::HashMap;
     use std::path::PathBuf;
 
