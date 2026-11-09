@@ -1,0 +1,98 @@
+name: Bug report
+description: Something in Steam Punk doesn't work as it should
+labels:
+- bug
+body:
+- type: markdown
+  attributes:
+    value: |-
+      Thanks for taking the time to report this. Before you start:
+      - **Try the [newest release](https://github.com/labj1987/steam-punk/releases/latest) first.** Every release includes the fixes before it, and yours may already be fixed.
+      - **Search the [open issues](https://github.com/labj1987/steam-punk/issues).** If yours is there, add your details to it instead.
+      - English, please.
+      - **Never attach trainer files** (the `.exe` or its archive); name the trainer and its version instead.
+      - Steam Punk needs the game already running from Steam when you launch a trainer.
+- type: input
+  id: version
+  attributes:
+    label: Steam Punk version
+    description: Shown in the app's About window, or in the AppImage's file name (`steam-punk-X.Y.Z-x86_64.AppImage`).
+    placeholder: 1.2.3
+  validations:
+    required: true
+- type: dropdown
+  id: kind
+  attributes:
+    label: What kind of problem
+    options:
+    - The trainer doesn't start
+    - The trainer starts but doesn't work in the game
+    - Importing a trainer or game
+    - The app (list, cover art, display)
+    - Setup or install
+    - Something else
+  validations:
+    required: true
+- type: textarea
+  id: what
+  attributes:
+    label: What happened
+    description: What you did, what you saw, and what you expected instead.
+  validations:
+    required: true
+- type: input
+  id: game
+  attributes:
+    label: Game and Steam AppID
+    placeholder: Cyberpunk 2077 (1091500)
+  validations:
+    required: true
+- type: input
+  id: trainer
+  attributes:
+    label: Trainer
+    description: Its maker, name and version.
+    placeholder: FLiNG v2.1
+  validations:
+    required: true
+- type: input
+  id: proton
+  attributes:
+    label: Proton version
+    description: The Proton build the game runs with.
+    placeholder: Proton Experimental 11.0-20261027b
+  validations:
+    required: true
+- type: input
+  id: system
+  attributes:
+    label: Distribution, kernel and desktop
+    description: For example from `uname -r` and your desktop's About page.
+    placeholder: Ubuntu 26.04, kernel 7.3.0, GNOME Wayland
+  validations:
+    required: true
+- type: textarea
+  id: logs
+  attributes:
+    label: Log
+    description: Attach `~/.local/share/steam-punk/steam-punk.log`.
+  validations:
+    required: true
+- type: textarea
+  id: media
+  attributes:
+    label: Screenshots
+    description: For problems in the app.
+  validations:
+    required: false
+- type: checkboxes
+  id: checks
+  attributes:
+    label: Before you send it
+    options:
+    - label: I'm on the newest release, or the problem is still there on it.
+      required: true
+    - label: I searched the open issues for this problem.
+      required: true
+    - label: I'm not attaching trainer files.
+      required: true
