@@ -4,6 +4,11 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.7.3 — 2026-11-12
+
+- Build: the app is now built with Rust 1.100, with a 3-day cooldown on new dependency versions
+  and Cargo's own lints turned on.
+
 ## 0.7.2 — 2026-10-30
 
 - Removing a trainer while it is running is refused, with a note to stop it first, instead of
