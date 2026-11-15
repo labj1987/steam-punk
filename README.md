@@ -82,8 +82,12 @@ winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 
 ## Requirements
 
-The AppImage brings its own GTK 4 and libadwaita, so it also runs on desktops that
-ship neither (a stock KDE Plasma or Hyprland install). It takes the basics every
+GTK 4.12+ and libadwaita 1.5+ from the system are used when they are there, so the
+window looks like the rest of your desktop (theme, accent colour). Without them, or
+with older ones, the AppImage uses the GTK 4 and libadwaita it brings, so it also runs
+on desktops that ship neither (a stock KDE Plasma or Hyprland install); that copy
+(libadwaita 1.5) follows dark mode but not the desktop's accent colour.
+`STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. Either way it takes the basics every
 desktop has from the system: **glibc 2.39 or newer**, OpenGL/EGL drivers, X11 or
 Wayland client libraries, and fontconfig, freetype, harfbuzz and fribidi (if one is
 missing, the app names it). Automatic one-time setup
