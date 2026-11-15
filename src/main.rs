@@ -1,6 +1,7 @@
 mod applog;
 mod fsutil;
 mod gamedata;
+mod host_env;
 mod launcher;
 mod library;
 mod setup;

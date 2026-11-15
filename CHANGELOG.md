@@ -4,6 +4,21 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.8.0 — 2026-11-15
+
+- **A missing password dialog is now named as the problem.** On a desktop with no polkit authentication
+  agent (the program that shows the admin password dialog, often missing on Hyprland, sway and i3),
+  the .NET setup used to report "Authentication was cancelled". It now says that no agent is running,
+  that nothing was changed, and which one to start (for example hyprpolkitagent on Hyprland, or
+  polkit-gnome (policykit-1-gnome on Debian/Ubuntu) or lxqt-policykit on sway and i3).
+- **Runs on desktops without GTK 4 or libadwaita.** The AppImage now also carries its own GTK 4 and
+  libadwaita, for systems that have none or too old a copy (older than GTK 4.12 or libadwaita 1.5), so
+  it starts on a stock KDE Plasma or Hyprland install, where it used to exit without showing anything.
+  Where the system has them, as on any current GNOME, Steam Punk uses the system's, as before, with
+  your theme and accent colour. If a basic system library is missing (graphics drivers, fonts) or the
+  system is too old (glibc older than 2.39), Steam Punk says so. `STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. The AppImage is larger: about
+  36 MB instead of 3 MB.
+
 ## 0.7.3 — 2026-11-12
 
 - Build: the app is now built with Rust 1.100, with a 3-day cooldown on new dependency versions

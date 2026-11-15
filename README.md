@@ -82,10 +82,22 @@ winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 
 ## Requirements
 
-The AppImage does not bundle GTK or libadwaita: it uses the host's, so the
-system needs **GTK >= 4.12 and libadwaita >= 1.5**. Automatic one-time setup
+GTK 4.12+ and libadwaita 1.5+ from the system are used when they are there, so the
+window looks like the rest of your desktop (theme, accent colour). Without them, or
+with older ones, the AppImage uses the GTK 4 and libadwaita it brings, so it also runs
+on desktops that ship neither (a stock KDE Plasma or Hyprland install); that copy
+(libadwaita 1.5) follows dark mode but not the desktop's accent colour.
+`STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. Either way it takes the basics every
+desktop has from the system: **glibc 2.39 or newer**, OpenGL/EGL drivers and the Vulkan loader, X11 or
+Wayland client libraries, and fontconfig, freetype, harfbuzz and fribidi (if one is
+missing, the app names it). Automatic one-time setup
 (system packages for the .NET install) is Debian/Ubuntu-only and needs polkit
 (`pkexec`); other distributions get the manual commands to run instead.
+If the setup says no polkit authentication agent is running, start one and try again: KDE,
+GNOME and COSMIC include one; on Hyprland use `hyprpolkitagent`, on sway or i3 use
+`polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`.
+
+Tested desktops: GNOME, KDE Plasma, Hyprland and COSMIC. Other Wayland and X11 desktops should work too.
 
 ## Install, update and uninstall
 
@@ -111,7 +123,9 @@ automatic setup ran, also remove `/usr/lib/steam-punk/`, that polkit policy and
 
 Produces `steam-punk-<version>-x86_64.AppImage` (+ `.zsync` sidecar). Needs
 cargo and the GTK 4 / libadwaita headers (installed with apt, through sudo, if
-missing), `zsync` for the sidecar, and network access for the pinned
+missing), `patchelf` and the GTK runtime pieces the AppImage bundles
+(`librsvg2-common`, `dconf-gsettings-backend`, `ibus-gtk4`, `libgdk-pixbuf2.0-bin`,
+`gsettings-desktop-schemas`; release builds run on Ubuntu 24.04), `zsync` for the sidecar, and network access for the pinned
 appimagetool and AppImage runtime it downloads.
 
 ## Non-goals
