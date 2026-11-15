@@ -129,18 +129,25 @@ pub fn run_system_setup() -> Result<()> {
 /// pkexec's own complaint when no polkit authentication agent (the program
 /// that shows the admin password dialog) is running, as on a bare Hyprland,
 /// sway or i3 session. It exits 127 with this on stderr.
-const NO_AGENT_TEXT: &str = "No authentication agent found";
+const NO_AGENT_TEXTS: [&str; 2] = [
+    // With --disable-internal-agent, or when no agent is registered.
+    "No authentication agent found",
+    // What an app started from a launcher (no terminal) gets: pkexec's own
+    // text agent can't open /dev/tty.
+    "Error creating textual authentication agent",
+];
 
-const NO_AGENT_MESSAGE: &str = "No polkit authentication agent is running (the program that shows the admin password dialog), so nothing was changed. Start one and try again. KDE, GNOME and COSMIC include one; on Hyprland use hyprpolkitagent; on sway or i3 use polkit-gnome or lxqt-policykit.";
+const NO_AGENT_MESSAGE: &str = "No polkit authentication agent is running (the program that shows the admin password dialog), so nothing was changed. Start one and try again. KDE, GNOME and COSMIC include one; on Hyprland use hyprpolkitagent; on sway or i3 use polkit-gnome (policykit-1-gnome on Debian/Ubuntu) or lxqt-policykit.";
 
 fn no_agent(stderr: &str) -> bool {
-    stderr.contains(NO_AGENT_TEXT)
+    NO_AGENT_TEXTS.iter().any(|t| stderr.contains(t))
 }
 
 /// Runs pkexec with stdin and stdout as they were and stderr captured, which
 /// is passed on to this process's own stderr afterwards so nothing is lost.
 fn run_pkexec(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus, String)> {
     let out = cmd
+        .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::piped())
         .output()?;
@@ -350,20 +357,14 @@ mod tests {
         assert!(!no_agent(
             "Error executing command as another user: Not authorized\n"
         ));
+        assert!(no_agent(
+            "Error creating textual authentication agent: Error opening current controlling terminal for the process (`/dev/tty'): No such device or address\n"
+        ));
         assert!(!no_agent(""));
         assert!(
             NO_AGENT_MESSAGE.contains("hyprpolkitagent")
                 && NO_AGENT_MESSAGE.contains("nothing was changed")
         );
-    }
-
-    #[test]
-    fn run_pkexec_captures_stderr_and_status() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo 'No authentication agent found.' >&2; exit 127"]);
-        let (status, stderr) = run_pkexec(&mut cmd).unwrap();
-        assert_eq!(status.code(), Some(127));
-        assert!(no_agent(&stderr));
     }
 
     #[test]

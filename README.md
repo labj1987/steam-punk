@@ -88,7 +88,7 @@ system needs **GTK >= 4.12 and libadwaita >= 1.5**. Automatic one-time setup
 (`pkexec`); other distributions get the manual commands to run instead.
 If the setup says no polkit authentication agent is running, start one and try again: KDE,
 GNOME and COSMIC include one; on Hyprland use `hyprpolkitagent`, on sway or i3 use
-`polkit-gnome` or `lxqt-policykit`.
+`polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`.
 
 ## Install, update and uninstall
 

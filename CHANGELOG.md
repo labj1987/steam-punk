@@ -10,7 +10,7 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
   agent (the program that shows the admin password dialog, often missing on Hyprland, sway and i3),
   the .NET setup used to report "Authentication was cancelled". It now says that no agent is running,
   that nothing was changed, and which one to start (for example hyprpolkitagent on Hyprland, or
-  polkit-gnome or lxqt-policykit on sway and i3).
+  polkit-gnome (policykit-1-gnome on Debian/Ubuntu) or lxqt-policykit on sway and i3).
 
 ## 0.7.3 — 2026-11-12
 
