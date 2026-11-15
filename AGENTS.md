@@ -149,6 +149,15 @@ just means the caller falls back to the trainer's filename-derived title.
 
 ## Build process
 
+GTK 4 and libadwaita are bundled (`bundle_gtk_runtime` in `build-appimage.sh`): the ldd closure of
+the binary minus the AppImage excludelist (glibc, libstdc++/libgcc_s, GL/EGL/DRM, X11/xcb, Wayland,
+fonts; the script cites the excludelist version) plus the Vulkan loader, the SVG pixbuf loader, the
+dconf GIO module and the IBus IM module, with compiled schemas. Libraries are found through
+`$ORIGIN` rpaths set with patchelf, never `LD_LIBRARY_PATH`. AppRun's `bundle_env` sets
+`GTK_EXE_PREFIX`, `GDK_PIXBUF_MODULE_FILE`, `GIO_MODULE_DIR` and `GSETTINGS_SCHEMA_DIR` and keeps the
+earlier values in `APPIMAGE_ORIG_*`; every program the app starts must be built with
+`host_env::command` (a test fails on a bare `Command::new` outside test code), which puts them back.
+
 `build-appimage.sh` builds the AppImage, `appimagetool`-direct
 (no `linuxdeploy`). It runs as an ordinary user and writes only inside the
 checkout:
