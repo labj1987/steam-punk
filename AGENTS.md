@@ -239,6 +239,8 @@ formatting commit is listed in `.git-blame-ignore-revs`; to have local `git blam
 
 ## Release process
 
+Dry run (the release build of a branch, nothing published, nobody notified): `gh workflow run release.yml --ref BRANCH -f dry_run=true`; the AppImage and .zsync are the run's `release-files` artifact.
+
 1. Bump `version` in `Cargo.toml`.
 2. Add a `CHANGELOG.md` entry (see Changelog below).
 3. Run `python3 scripts/sync_appdata_releases.py` to regenerate the
