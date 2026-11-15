@@ -16,8 +16,8 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
   libadwaita, for systems that have none or too old a copy (older than GTK 4.12 or libadwaita 1.5), so
   it starts on a stock KDE Plasma or Hyprland install, where it used to exit without showing anything.
   Where the system has them, as on any current GNOME, Steam Punk uses the system's, as before, with
-  your theme and accent colour. If a basic system library is missing (graphics drivers, fonts), Steam
-  Punk names it. `STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. The AppImage is larger: about
+  your theme and accent colour. If a basic system library is missing (graphics drivers, fonts) or the
+  system is too old (glibc older than 2.39), Steam Punk says so. `STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. The AppImage is larger: about
   36 MB instead of 3 MB.
 
 ## 0.7.3 — 2026-11-12

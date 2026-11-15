@@ -88,7 +88,7 @@ with older ones, the AppImage uses the GTK 4 and libadwaita it brings, so it als
 on desktops that ship neither (a stock KDE Plasma or Hyprland install); that copy
 (libadwaita 1.5) follows dark mode but not the desktop's accent colour.
 `STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. Either way it takes the basics every
-desktop has from the system: **glibc 2.39 or newer**, OpenGL/EGL drivers, X11 or
+desktop has from the system: **glibc 2.39 or newer**, OpenGL/EGL drivers and the Vulkan loader, X11 or
 Wayland client libraries, and fontconfig, freetype, harfbuzz and fribidi (if one is
 missing, the app names it). Automatic one-time setup
 (system packages for the .NET install) is Debian/Ubuntu-only and needs polkit
