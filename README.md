@@ -83,7 +83,8 @@ winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 ## Requirements
 
 The AppImage does not bundle GTK or libadwaita: it uses the host's, so the
-system needs **GTK >= 4.12 and libadwaita >= 1.5**. Automatic one-time setup
+system needs **GTK >= 4.12 and libadwaita >= 1.5** (without them the app says which
+libraries are missing and which packages to install). Automatic one-time setup
 (system packages for the .NET install) is Debian/Ubuntu-only and needs polkit
 (`pkexec`); other distributions get the manual commands to run instead.
 If the setup says no polkit authentication agent is running, start one and try again: KDE,

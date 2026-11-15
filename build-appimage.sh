@@ -70,6 +70,69 @@ desktop-file-validate "$APPDIR/$APP.desktop"
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/usr/bin/env bash
 HERE="$(dirname "$(readlink -f "$0")")"
+
+# >>> libcheck: before any setup, make sure the app's shared libraries resolve.
+# LIBCHECK_LDD, LIBCHECK_OS_RELEASE and LIBCHECK_DIALOG=none exist for the tests.
+libcheck_missing() {
+    local out
+    if [[ -n "${LIBCHECK_LDD:-}" ]]; then
+        out="$("$LIBCHECK_LDD" "$1" 2>/dev/null)"
+    elif command -v ldd >/dev/null 2>&1; then
+        out="$(ldd "$1" 2>/dev/null)"
+    else
+        out="$(LD_TRACE_LOADED_OBJECTS=1 "$1" 2>/dev/null)"
+    fi
+    sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' <<<"$out"
+}
+
+libcheck_install_hint() {
+    local f="${LIBCHECK_OS_RELEASE:-/etc/os-release}" ids id
+    [[ -r "$f" ]] || return 0
+    # shellcheck disable=SC1090
+    ids="$(. "$f" 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}")"
+    for id in $ids; do
+        case "$id" in
+            debian|ubuntu|linuxmint|pop) echo "sudo apt install libgtk-4-1 libadwaita-1-0"; return 0 ;;
+            fedora|rhel|centos|rocky|almalinux) echo "sudo dnf install gtk4 libadwaita"; return 0 ;;
+            arch|cachyos|manjaro|endeavouros) echo "sudo pacman -S gtk4 libadwaita"; return 0 ;;
+            opensuse*|suse|sles) echo "sudo zypper install libgtk-4-1 libadwaita-1-0"; return 0 ;;
+        esac
+    done
+}
+
+libcheck_show() {
+    printf '%s: %s\n' "$1" "$2" >&2
+    [[ "${LIBCHECK_DIALOG:-}" == none ]] && return 0
+    [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || return 0
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error --title="$1" --text="$2" --width=460 >/dev/null 2>&1
+    elif command -v kdialog >/dev/null 2>&1; then
+        kdialog --error "$2" --title "$1" >/dev/null 2>&1
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical "$1" "$2" >/dev/null 2>&1
+    fi
+    return 0
+}
+
+# libcheck_run NAME BINARY: returns 1 (after showing why) when libraries are missing.
+libcheck_run() {
+    local missing list hint msg
+    missing="$(libcheck_missing "$2")"
+    [[ -n "$missing" ]] || return 0
+    list="$(paste -sd, - <<<"$missing" | sed 's/,/, /g')"
+    hint="$(libcheck_install_hint)"
+    msg="$1 can't start because these system libraries are missing: $list."
+    if [[ -n "$hint" ]]; then
+        msg+=" They come with GTK 4 and libadwaita. Install them with: $hint, then start $1 again."
+    else
+        msg+=" They come with GTK 4 (4.12 or newer) and libadwaita (1.5 or newer): install both with your package manager, then start $1 again."
+    fi
+    libcheck_show "$1" "$msg"
+    return 1
+}
+# <<< libcheck
+
+libcheck_run "Steam Punk" "$HERE/usr/bin/steam-punk" || exit 1
 export PATH="$HERE/usr/bin:$PATH"
 exec "$HERE/usr/bin/steam-punk" "$@"
 APPRUN

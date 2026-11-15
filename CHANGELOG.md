@@ -12,6 +12,10 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
   that nothing was changed, and which one to start (for example hyprpolkitagent on Hyprland, or
   polkit-gnome (policykit-1-gnome on Debian/Ubuntu) or lxqt-policykit on sway and i3).
 
+- **A missing GTK 4 or libadwaita is now explained.** On a system without them (a fresh Fedora KDE or
+  Hyprland install, for one) Steam Punk used to exit without showing anything. It now says which
+  libraries are missing and which packages to install for apt, dnf, pacman and zypper.
+
 ## 0.7.3 — 2026-11-12
 
 - Build: the app is now built with Rust 1.100, with a 3-day cooldown on new dependency versions
