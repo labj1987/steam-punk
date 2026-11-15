@@ -97,6 +97,8 @@ If the setup says no polkit authentication agent is running, start one and try a
 GNOME and COSMIC include one; on Hyprland use `hyprpolkitagent`, on sway or i3 use
 `polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`.
 
+Tested desktops: GNOME, KDE Plasma, Hyprland and COSMIC. Other Wayland and X11 desktops should work too.
+
 ## Install, update and uninstall
 
 Download `steam-punk-<version>-x86_64.AppImage` from
