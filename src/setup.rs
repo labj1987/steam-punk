@@ -84,9 +84,9 @@ pub fn run_system_setup() -> Result<()> {
     let current =
         installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
 
-    let status = if current {
+    let (status, stderr) = if current {
         crate::applog::log("run_system_setup: launching pkexec privileged-setup.sh");
-        Command::new("pkexec").arg(SCRIPT).status()
+        run_pkexec(Command::new("pkexec").arg(SCRIPT))
     } else {
         // polkit can only show the policy's own message once the policy is
         // installed, so this one prompt (which installs it) is pkexec's
@@ -99,27 +99,54 @@ pub fn run_system_setup() -> Result<()> {
         let staged_policy = stage.0.join("policy");
         std::fs::write(&staged_script, SCRIPT_BYTES).context("staging the setup script")?;
         std::fs::write(&staged_policy, POLICY_BYTES).context("staging the polkit policy")?;
-        Command::new("pkexec")
-            .args(["/bin/bash", "-c", INSTALLER, "bash"])
-            .arg(&staged_script)
-            .arg(SCRIPT)
-            .arg(SCRIPT_SHA256)
-            .arg(&staged_policy)
-            .arg(POLICY)
-            .arg(POLICY_SHA256)
-            .status()
+        run_pkexec(
+            Command::new("pkexec")
+                .args(["/bin/bash", "-c", INSTALLER, "bash"])
+                .arg(&staged_script)
+                .arg(SCRIPT)
+                .arg(SCRIPT_SHA256)
+                .arg(&staged_policy)
+                .arg(POLICY)
+                .arg(POLICY_SHA256),
+        )
     }
     .context("Failed to launch pkexec — is polkit installed?")?;
 
     crate::applog::log(&format!("run_system_setup: pkexec exited {status:?}"));
     if !status.success() {
         let code = status.code().unwrap_or(-1);
+        if code == 127 && no_agent(&stderr) {
+            bail!("{}", NO_AGENT_MESSAGE);
+        }
         if code == 126 || code == 127 {
             bail!("Authentication was cancelled.");
         }
         bail!("Script exited with code {} (see {})", code, LOGFILE);
     }
     Ok(())
+}
+
+/// pkexec's own complaint when no polkit authentication agent (the program
+/// that shows the admin password dialog) is running, as on a bare Hyprland,
+/// sway or i3 session. It exits 127 with this on stderr.
+const NO_AGENT_TEXT: &str = "No authentication agent found";
+
+const NO_AGENT_MESSAGE: &str = "No polkit authentication agent is running (the program that shows the admin password dialog), so nothing was changed. Start one and try again. KDE, GNOME and COSMIC include one; on Hyprland use hyprpolkitagent; on sway or i3 use polkit-gnome or lxqt-policykit.";
+
+fn no_agent(stderr: &str) -> bool {
+    stderr.contains(NO_AGENT_TEXT)
+}
+
+/// Runs pkexec with stdin and stdout as they were and stderr captured, which
+/// is passed on to this process's own stderr afterwards so nothing is lost.
+fn run_pkexec(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus, String)> {
+    let out = cmd
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
+        .output()?;
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    eprint!("{stderr}");
+    Ok((out.status, stderr))
 }
 
 /// A private temp dir for the staged copies, removed on drop.
@@ -313,6 +340,30 @@ mod tests {
             proton_dir: proton.to_path_buf(),
             sandbox: None,
         }
+    }
+
+    #[test]
+    fn missing_polkit_agent_is_recognised() {
+        assert!(no_agent(
+            "Error executing command as another user: No authentication agent found.\n"
+        ));
+        assert!(!no_agent(
+            "Error executing command as another user: Not authorized\n"
+        ));
+        assert!(!no_agent(""));
+        assert!(
+            NO_AGENT_MESSAGE.contains("hyprpolkitagent")
+                && NO_AGENT_MESSAGE.contains("nothing was changed")
+        );
+    }
+
+    #[test]
+    fn run_pkexec_captures_stderr_and_status() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo 'No authentication agent found.' >&2; exit 127"]);
+        let (status, stderr) = run_pkexec(&mut cmd).unwrap();
+        assert_eq!(status.code(), Some(127));
+        assert!(no_agent(&stderr));
     }
 
     #[test]

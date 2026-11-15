@@ -4,6 +4,14 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## Unreleased
+
+- A missing password dialog is now named as the problem. On a desktop with no polkit authentication
+  agent (the program that shows the admin password dialog, often missing on Hyprland, sway and i3),
+  the .NET setup used to report "Authentication was cancelled". It now says that no agent is running,
+  that nothing was changed, and which one to start (for example hyprpolkitagent on Hyprland, or
+  polkit-gnome or lxqt-policykit on sway and i3).
+
 ## 0.7.3 — 2026-11-12
 
 - Build: the app is now built with Rust 1.100, with a 3-day cooldown on new dependency versions
