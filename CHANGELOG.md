@@ -4,6 +4,16 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.9.2 — 2026-11-16
+
+- **Starting Steam Punk again just as it closes opens a new window at once.** A start made at
+  that moment is no longer left waiting on the copy that is closing.
+- A second start is told the open copy is ready only once its window is actually on screen,
+  not a moment before it is first drawn.
+- When no window can be shown and the message has to go through another program, a dialog
+  that could not open is no longer taken as shown, so the message still reaches you as a
+  notification. The temporary file used for this now has a name nothing else can guess.
+
 ## 0.9.1 — 2026-11-16
 
 - **No more silent hang on Hyprland or sway started from a text console.** With no polkit
