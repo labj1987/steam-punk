@@ -4,7 +4,7 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
-## Unreleased
+## 0.9.0 — 2026-11-15
 
 - **One look on every desktop, and no GTK needed.** Steam Punk now draws its own window instead of
   using GTK 4 and libadwaita, so it looks and works the same on GNOME, KDE Plasma, Hyprland, sway,
@@ -16,11 +16,14 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
   with no GPU, Mesa's software renderer), glibc 2.39 or newer, and the X11 and Wayland client
   libraries every desktop has. If something is missing, Steam Punk says what and how to install it;
   if no graphics driver works, it says so in a dialog instead of showing nothing.
+- In the anti-cheat warning, Cancel is the default again, and Enter always acts on the button that
+  has the focus.
+- Starting Steam Punk a second time from your launcher brings the open window to the front on
+  Wayland too.
 - Notifications now appear at the bottom of the window, clear of the Launch and Stop buttons.
 - The file dialog now shows all files, not only `.exe` files; picking or dropping anything else is
   refused with a message.
-- Screen readers: buttons, trainers, dialog text and notifications are exposed, and notifications
-  are announced. A dialog has no name of its own (its title names the group the keyboard
+- Screen readers: buttons, trainers and dialog text are exposed, and notifications are announced. A dialog has no name of its own (its title names the group the keyboard
   focus goes to when it opens), and the window's own buttons and the About links are not exposed yet (see Known issues in
   the README).
 - "Show manual commands instead" in the one-time setup dialog now shows the commands in place of

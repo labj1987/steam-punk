@@ -110,8 +110,10 @@ Input methods (IBus and Fcitx 5) work in the search field.
 
 ## Known issues
 
-- **Screen readers.** Buttons, the trainer list, the search field, all text in dialogs
-  and every notification are exposed, and notifications are announced. A dialog itself
+- **While a dialog is open, move the window by the dialog's title**; the window's own title
+  bar does not respond until the dialog is closed.
+- **Screen readers.** Buttons, the trainer list, the search field and all text in dialogs
+  are exposed, and notifications are announced. A dialog itself
   has no name: its title names the group that holds its content, where the keyboard
   focus goes when it opens, and is the first text inside it. The window's minimise, maximise and close
   buttons and the two links in About are not exposed (close the window with your
@@ -123,6 +125,12 @@ Input methods (IBus and Fcitx 5) work in the search field.
 - **The font is one your system already has** (Ubuntu, Adwaita Sans, Cantarell, Noto Sans
   or DejaVu Sans, whichever is found first), not necessarily the one your desktop is
   set to.
+- **Starting Steam Punk a second time** shows the window that is already open. On Wayland
+  it comes to the front when the second start came from your launcher, dock or menu, which
+  hands over the permission to do so (a compositor may still refuse: Hyprland does unless
+  `misc:focus_on_activate` is on); started from a terminal, the desktop only marks the
+  window as wanting attention. On X11 the busy cursor of the second start goes away on its
+  own after a few seconds.
 - **KDE Plasma:** while the file dialog is open, the Steam Punk window can be hidden
   behind it; it comes back when the dialog closes.
 
@@ -167,6 +175,12 @@ Development assistance: Claude Code (Anthropic) and Codex (OpenAI).
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The window is drawn with [GPUI Kit](https://github.com/longbridge/gpui-kit) and GPUI
+(Apache-2.0), with icons from [Lucide](https://lucide.dev) (ISC). The AppImage carries the
+licence notices of these and of every other Rust crate built into it, in
+`usr/share/licenses/steam-punk/THIRD-PARTY-LICENSES.txt` (`--appimage-extract` shows it;
+`scripts/third_party_licenses.py` writes it).
 
 Code at or before commit `0d97e95b89080c5b53efca8880abfd8834d3009a` remains available
 under the MIT License per its original release. From this commit forward,

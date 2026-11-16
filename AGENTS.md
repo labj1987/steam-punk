@@ -58,8 +58,16 @@ error, and saving an AppID fails instead of wiping the file.
   runtime, runs the GPUI application.
 - `ui.rs` — the GPUI Kit UI: trainer list, import (drag-and-drop or
   +), AppID search/association, launch/troubleshoot dialogs.
-- `instance.rs` — one running copy per session: a socket in `XDG_RUNTIME_DIR`; a second
-  launch asks the first to show its window and exits.
+- `instance.rs` — one running copy per user login: a socket in `XDG_RUNTIME_DIR` (bound under a
+  `flock`ed lock file; a socket file is removed only when nobody listens on it); a second
+  launch sends its activation token, asks the first to show its window and exits. Without
+  `XDG_RUNTIME_DIR` there is no single-instance check.
+- `activation.rs` — raises the window for that second launch on Wayland: GPUI has no call that
+  takes an activation token, so `xdg_activation_v1.activate(token, surface)` is sent on GPUI's
+  own connection through the window's raw handles (wayland-client as a guest on the foreign
+  `wl_display`). No token (a start from a terminal) or X11: `Window::activate_window`, which on
+  Wayland only marks the window as wanting attention. Passing the token also ends the launcher's
+  startup feedback for the second copy; on X11 nothing completes it and it times out.
 - `launcher.rs` — resolves the running Proton build and compat paths,
   spawns the trainer, and the whole .NET-usability check/repair path (see
   Known quirks below). Largest file in the app.
@@ -183,7 +191,10 @@ checkout:
    bump it there and in both workflows together (each checks it).
 3. Assembles the AppDir (binary, appdata, desktop file, icon, generated
    `AppRun`) and runs `desktop-file-validate` on the copied desktop file
-   (fatal). `AppRun` only starts the app; it asks for no password. The
+   (fatal). `scripts/third_party_licenses.py` writes the notices of every crate in the build
+   (from `cargo metadata` and the crates' own licence files) to
+   `usr/share/licenses/steam-punk/THIRD-PARTY-LICENSES.txt`; CI runs it too.
+   `AppRun` only starts the app; it asks for no password. The
    privileged script and polkit policy are compiled into the binary
    (`include_bytes!`), with their SHA-256 pinned at build time by `build.rs`,
    not shipped as files (an extracted AppDir is user-writable). They must sit
@@ -226,6 +237,14 @@ checkout:
   buttons capped with `dialog_room(window)` and scrollable: the toolkit cuts off a dialog taller
   than the window. Run what a button starts with `window.defer` after `close_dialog`, so a
   follow-up dialog is not the one that gets closed.
+- Enter in a dialog: the toolkit sends Enter to the dialog's `on_ok` before the focused button
+  sees it. Every dialog therefore sets `on_ok` and acts as the focused button (`enter_key`):
+  confirm only when the action button has the focus, cancel on Cancel, and return false (stay
+  open) anywhere else. A dialog with a text field returns false always. The default button is
+  the one given the focus at opening; the anti-cheat warning's is Cancel.
+- Nothing may show a notification before the window has the toolkit's root view (that is,
+  from `MainView::new`): `push_notification` panics there. `show_toast` returns false instead,
+  and the first `refresh` runs from `build_ui` after `open_window`.
 - Screen readers: GPUI reports only elements with an id and a role. Use `label(id, text)` for
   text (never a bare string child in a dialog), `accessibility_label` on icon buttons and on
   buttons that repeat per row, and `toast()` for messages (it also feeds the `Announcer` live

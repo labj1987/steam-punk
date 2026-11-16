@@ -1,3 +1,4 @@
+mod activation;
 mod applog;
 mod fsutil;
 mod gamedata;

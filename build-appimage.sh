@@ -69,6 +69,13 @@ cp data/$APP-256.png "$APPDIR/$APP.png"
 
 desktop-file-validate "$APPDIR/$APP.desktop"
 
+# The app's own licence, and the notices of everything built into the binary: every Rust crate
+# of the release build with its licence text (the UI toolkit's assets crate carries the Lucide
+# icons' ISC licence).
+mkdir -p "$APPDIR/usr/share/licenses/$APP"
+cp LICENSE "$APPDIR/usr/share/licenses/$APP/"
+python3 scripts/third_party_licenses.py "$APPDIR/usr/share/licenses/$APP/THIRD-PARTY-LICENSES.txt"
+
 # ── AppRun ────────────────────────────────────────────────────────────
 # Just starts the app. The privileged setup script and polkit policy are compiled into the
 # binary (not shipped as files, which an extracted AppDir would let the user rewrite) and are

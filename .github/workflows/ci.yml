@@ -51,6 +51,9 @@ jobs:
         env:
           CARGO_BUILD_WARNINGS: deny
         run: cargo clippy --locked --all-targets -- -D warnings
+      # The AppImage ships the notices of every crate in the build; this is what writes them.
+      - name: Third-party notices can be generated
+        run: python3 scripts/third_party_licenses.py --self-test && python3 scripts/third_party_licenses.py "$RUNNER_TEMP/third-party-licenses.txt"
 
   scripts:
     runs-on: ubuntu-24.04

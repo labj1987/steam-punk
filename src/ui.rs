@@ -18,7 +18,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, Theme, ThemeMode, ThemeRegistry,
+    h_flex, v_flex, ActiveTheme as _, Icon, Root, Sizable as _, Theme, ThemeMode, ThemeRegistry,
     TitleBar, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -101,7 +101,19 @@ const LONG_TOAST: usize = 120;
 
 // Notifications show their text as plain text, so trainer names and error
 // text (Wine output is full of `<null>`) need no escaping.
+//
+// False when the message could not be shown: a window has no place for
+// notifications until the toolkit's root view is in it, which is after the
+// main view is built (pushing one earlier panics in the toolkit).
 fn toast(window: &mut Window, cx: &mut App, text: &str) {
+    show_toast(window, cx, text);
+}
+
+fn show_toast(window: &mut Window, cx: &mut App, text: &str) -> bool {
+    if window.root::<Root>().flatten().is_none() {
+        applog::log(&format!("UI: not shown (the window is not up yet): {text}"));
+        return false;
+    }
     window.push_notification(
         Notification::new()
             .message(text.to_string())
@@ -112,6 +124,7 @@ fn toast(window: &mut Window, cx: &mut App, text: &str) {
     );
     announce(text);
     window.refresh();
+    true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,13 +150,15 @@ fn named_group(id: &'static str, name: impl Into<SharedString>) -> Stateful<Div>
 // (0.9.1) also covers the invisible margin a client-decorated window keeps
 // around itself for its shadow, which shows as a dark frame around the
 // window on KDE and GNOME. Without it a dialog is as modal as with it (it
-// takes the input and the focus); only the dimming and click-outside-to-close
-// are gone.
+// takes the input and the focus); gone are the dimming, click-outside-to-close
+// and dragging the window by its title bar or the dimmed area, for which the
+// dialog's own title stands in (`dialog_title`).
 
 /// Puts the keyboard focus on a dialog's main button when the dialog opens.
 /// Left alone the focus sits on the dialog itself, which has no name; on a
 /// button it is inside the named group, so a screen reader announces the
-/// title, and Space and Enter act on the button straight away.
+/// title, and Space acts on the button straight away. Enter goes to the
+/// dialog first, which acts as the focused button would (see `EnterKey`).
 struct InitialFocus {
     handle: FocusHandle,
     pending: Cell<bool>,
@@ -178,6 +193,53 @@ fn dialog_room(window: &Window) -> Pixels {
 /// What a dialog needs of the window's height besides its text.
 const DIALOG_CHROME: f32 = 220.;
 
+/// The trainers.json problem to tell the user about: the current one, unless
+/// it is the one already shown.
+fn unreported<'a>(current: &'a Option<String>, shown: &Option<String>) -> Option<&'a String> {
+    current.as_ref().filter(|_| current != shown)
+}
+
+/// What Enter does in a dialog. The toolkit hands Enter to the dialog (its
+/// "confirm") before the focused button sees it, so the dialog looks at
+/// where the focus is and acts as that button would: Enter on Cancel
+/// cancels, Enter on the action confirms, and Enter anywhere else (the close
+/// button, a disclosure) is not a decision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum EnterKey {
+    Confirm,
+    Cancel,
+    Nothing,
+}
+
+fn enter_key(action_focused: bool, cancel_focused: bool) -> EnterKey {
+    if action_focused {
+        EnterKey::Confirm
+    } else if cancel_focused {
+        EnterKey::Cancel
+    } else {
+        EnterKey::Nothing
+    }
+}
+
+/// Which button of a question has the focus when it opens, and so which one
+/// Enter and Space act on if the user just presses them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DefaultButton {
+    Action,
+    Cancel,
+}
+
+/// A dialog's title, which is also the handle to move the window by: while a
+/// dialog is open the toolkit keeps the pointer off everything under it, the
+/// window's own title bar included (its dimming layer would take the drag,
+/// but see `.overlay(false)` above).
+fn dialog_title(title: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .w_full()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+        .child(label("title", title))
+}
+
 /// The button row at the bottom of a dialog.
 fn dialog_buttons() -> Div {
     h_flex().justify_end().gap_2().pt_1()
@@ -210,6 +272,42 @@ fn announce(text: &str) {
 struct Announcer(SharedString);
 
 impl IntoElement for Announcer {
+    type Element = Hidden;
+
+    fn into_element(self) -> Self::Element {
+        Hidden {
+            id: "announcer",
+            text: self.0,
+            live: true,
+        }
+    }
+}
+
+/// Text for screen readers only, as a label: for text the toolkit draws
+/// itself without exposing it (the manual commands' code view).
+struct Unseen(&'static str, SharedString);
+
+impl IntoElement for Unseen {
+    type Element = Hidden;
+
+    fn into_element(self) -> Self::Element {
+        Hidden {
+            id: self.0,
+            text: self.1,
+            live: false,
+        }
+    }
+}
+
+/// An element that draws nothing and takes no room, and is in the
+/// accessibility tree: a live region named `text`, or a label holding it.
+struct Hidden {
+    id: &'static str,
+    text: SharedString,
+    live: bool,
+}
+
+impl IntoElement for Hidden {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -217,12 +315,12 @@ impl IntoElement for Announcer {
     }
 }
 
-impl Element for Announcer {
+impl Element for Hidden {
     type RequestLayoutState = ();
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
-        Some("announcer".into())
+        Some(self.id.into())
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -230,13 +328,17 @@ impl Element for Announcer {
     }
 
     fn a11y_role(&self) -> Option<Role> {
-        Some(Role::Status)
+        Some(if self.live { Role::Status } else { Role::Label })
     }
 
     fn write_a11y_info(&self, node: &mut accesskit::Node) {
+        if !self.live {
+            node.set_value(self.text.to_string());
+            return;
+        }
         node.set_live(accesskit::Live::Polite);
-        if !self.0.is_empty() {
-            node.set_label(self.0.to_string());
+        if !self.text.is_empty() {
+            node.set_label(self.text.to_string());
         }
     }
 
@@ -282,19 +384,33 @@ impl Element for Announcer {
 /// A question with Cancel and one action. `on_ok` runs at most once, after
 /// the dialog is out of the way; cancelling (the button, Escape, the close
 /// button) drops it.
-fn show_confirm_dialog(
+struct Question {
     id: &'static str,
     title: &'static str,
     body: SharedString,
     ok_text: &'static str,
-    on_ok: Continuation,
-    window: &mut Window,
-    cx: &mut App,
-) {
+    default: DefaultButton,
+}
+
+fn show_confirm_dialog(question: Question, on_ok: Continuation, window: &mut Window, cx: &mut App) {
+    let Question {
+        id,
+        title,
+        body,
+        ok_text,
+        default,
+    } = question;
     let slot = Rc::new(RefCell::new(Some(on_ok)));
-    let focus = InitialFocus::new(cx);
+    let action_focus = cx.focus_handle();
+    let cancel_focus = cx.focus_handle();
+    let first = Cell::new(true);
     window.open_dialog(cx, move |dialog, window, cx| {
-        focus.apply(window, cx);
+        if first.replace(false) {
+            match default {
+                DefaultButton::Action => action_focus.focus(window, cx),
+                DefaultButton::Cancel => cancel_focus.focus(window, cx),
+            }
+        }
         let confirm = {
             let slot = slot.clone();
             move |window: &mut Window, cx: &mut App| {
@@ -304,15 +420,23 @@ fn show_confirm_dialog(
             }
         };
         let enter = confirm.clone();
+        let enter_cancel = slot.clone();
         let cancel = slot.clone();
         let dismissed = slot.clone();
+        let (on_action, on_cancel) = (action_focus.clone(), cancel_focus.clone());
         dialog
-            .title(label("title", title))
+            .title(dialog_title(title))
             .overlay(false)
             .w(px(400.))
-            // Enter confirms, like the action button.
+            // Enter: what the focused button says (see `EnterKey`).
             .on_ok(move |_, window, cx| {
-                enter(window, cx);
+                match enter_key(on_action.is_focused(window), on_cancel.is_focused(window)) {
+                    EnterKey::Confirm => enter(window, cx),
+                    EnterKey::Cancel => {
+                        enter_cancel.borrow_mut().take();
+                    }
+                    EnterKey::Nothing => return false,
+                }
                 true
             })
             // Escape and the close button; after a confirm there is nothing left to drop.
@@ -330,17 +454,20 @@ fn show_confirm_dialog(
                     )
                     .child(
                         dialog_buttons()
-                            .child(Button::new("cancel").label("Cancel").on_click(
-                                move |_, window, cx| {
-                                    cancel.borrow_mut().take();
-                                    window.close_dialog(cx);
-                                },
-                            ))
+                            .child(
+                                Button::new("cancel")
+                                    .label("Cancel")
+                                    .track_focus(&cancel_focus)
+                                    .on_click(move |_, window, cx| {
+                                        cancel.borrow_mut().take();
+                                        window.close_dialog(cx);
+                                    }),
+                            )
                             .child(
                                 Button::new("ok")
                                     .primary()
                                     .label(ok_text)
-                                    .track_focus(&focus.handle)
+                                    .track_focus(&action_focus)
                                     .on_click(move |_, window, cx| {
                                         window.close_dialog(cx);
                                         confirm(window, cx);
@@ -356,42 +483,74 @@ fn show_confirm_dialog(
 /// in. Says so through whatever the desktop offers, then exits: a process
 /// left behind with no window would also keep later launches from starting.
 fn no_window(error: &str) -> ! {
-    let message = format!(
-        "Steam Punk could not open its window: no working graphics driver was found \
-         (Vulkan or OpenGL ES). Install or repair your GPU driver, or install Mesa's \
-         software renderer (mesa-vulkan-drivers on Debian, Ubuntu and Fedora; vulkan-swrast \
-         on Arch).\n\nDetails: {error}"
-    );
+    let has_display = ["WAYLAND_DISPLAY", "DISPLAY"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    let message = no_window_message(error, has_display);
     eprintln!("steam-punk: {message}");
     applog::log(&format!("UI: {message}"));
-    let dialogs: [(&str, &[&str]); 4] = [
-        ("kdialog", &["--title", "Steam Punk", "--error"]),
-        (
-            "zenity",
-            &[
-                "--error",
-                "--no-markup",
-                "--title=Steam Punk",
-                "--width=480",
-                "--text",
-            ],
-        ),
-        (
-            "notify-send",
-            &["--urgency=critical", "--app-name=Steam Punk", "Steam Punk"],
-        ),
-        ("xmessage", &["-center"]),
-    ];
-    for (program, args) in dialogs {
-        let shown = std::process::Command::new(program)
-            .args(args)
-            .arg(&message)
-            .status();
-        if shown.is_ok_and(|status| status.success()) {
-            break;
+    // With no display there is nowhere to show a dialog either.
+    if has_display {
+        for (program, args) in ERROR_DIALOGS {
+            let status = std::process::Command::new(program)
+                .args(*args)
+                .arg(&message)
+                .status();
+            if status.is_ok_and(|status| helper_showed(program, status.code())) {
+                break;
+            }
         }
     }
     std::process::exit(1);
+}
+
+/// The programs tried, in order, to show an error when the app has no window.
+const ERROR_DIALOGS: &[(&str, &[&str])] = &[
+    ("kdialog", &["--title", "Steam Punk", "--error"]),
+    (
+        "zenity",
+        &[
+            "--error",
+            "--no-markup",
+            "--title=Steam Punk",
+            "--width=480",
+            "--text",
+        ],
+    ),
+    (
+        "notify-send",
+        &["--urgency=critical", "--app-name=Steam Punk", "Steam Punk"],
+    ),
+    ("xmessage", &["-center"]),
+];
+
+/// Whether `program`, having ended with exit `code`, did show the message, so
+/// the next one must not show it again. The dialogs end with 0 when the user
+/// pressed their button and 1 when the user closed them another way; both
+/// mean it was seen. Anything else (no display, a crash, a signal) does not.
+/// notify-send shows nothing itself: only 0 says the desktop took the message.
+fn helper_showed(program: &str, code: Option<i32>) -> bool {
+    match program {
+        "notify-send" => code == Some(0),
+        _ => matches!(code, Some(0 | 1)),
+    }
+}
+
+fn no_window_message(error: &str, has_display: bool) -> String {
+    if has_display {
+        format!(
+            "Steam Punk could not open its window: no working graphics driver was found \
+             (Vulkan or OpenGL ES). Install or repair your GPU driver, or install Mesa's \
+             software renderer (mesa-vulkan-drivers on Debian, Ubuntu and Fedora; vulkan-swrast \
+             on Arch).\n\nDetails: {error}"
+        )
+    } else {
+        format!(
+            "Steam Punk could not open its window: there is no display to open it on \
+             (neither WAYLAND_DISPLAY nor DISPLAY is set). Start it from your desktop session.\
+             \n\nDetails: {error}"
+        )
+    }
 }
 
 type RunningMap = Rc<RefCell<HashMap<PathBuf, u32>>>;
@@ -485,6 +644,13 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn build_ui(cx: &mut App, mut activations: Activations) {
+    // With no display GPUI would run on with no window and no word about it.
+    if ["WAYLAND_DISPLAY", "DISPLAY"]
+        .into_iter()
+        .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
+    {
+        no_window("no display server to connect to");
+    }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(480.), px(560.)), cx)),
         window_min_size: Some(size(px(360.), px(280.))),
@@ -505,10 +671,15 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
             .detach();
         cx.new(|cx| MainView::new(window, cx))
     });
-    let (window, _) = match opened {
+    let (window, view) = match opened {
         Ok(opened) => opened,
         Err(e) => no_window(&format!("{e:#}")),
     };
+    // The first read of the trainers, now that the window can show what is
+    // wrong with them.
+    let _ = window.update(cx, |_, window, cx| {
+        view.update(cx, |view, cx| view.refresh(window, cx));
+    });
 
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
@@ -517,10 +688,21 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     })
     .detach();
 
-    // A second launch asks this one to show its window.
+    // A second launch asks this one to show its window, with the activation
+    // token the desktop gave that launch when there is one: on Wayland only
+    // that raises the window (see activation.rs). Without a token, or off
+    // Wayland, GPUI's own request is what there is; a Wayland compositor then
+    // marks the window as wanting attention instead of raising it.
     cx.spawn(async move |cx| {
-        while activations.recv().await.is_some() {
-            let _ = window.update(cx, |_, window, _| window.activate_window());
+        while let Some(token) = activations.recv().await {
+            let _ = window.update(cx, |_, window, _| {
+                let raised = token
+                    .as_deref()
+                    .is_some_and(|token| crate::activation::activate(window, token));
+                if !raised {
+                    window.activate_window();
+                }
+            });
         }
     })
     .detach();
@@ -586,7 +768,7 @@ impl MainView {
             }
         });
 
-        let mut view = Self {
+        let view = Self {
             trainers: Vec::new(),
             running: Rc::new(RefCell::new(HashMap::new())),
             cover_retry_attempted: HashSet::new(),
@@ -594,8 +776,10 @@ impl MainView {
             focus_handle: cx.focus_handle(),
             _poll: poll,
         };
+        // The list is filled by `build_ui` once the window is up: reading it
+        // can have something to tell the user (a damaged trainers.json), and
+        // there is nowhere to show that from here.
         view.focus_handle.focus(window, cx);
-        view.refresh(window, cx);
         view
     }
 
@@ -654,10 +838,12 @@ impl MainView {
             trainers: Vec::new(),
             meta_error: Some(format!("{e:#}")),
         });
-        if listing.meta_error != self.meta_error_shown {
-            if let Some(e) = &listing.meta_error {
-                toast(window, cx, e);
+        if let Some(e) = unreported(&listing.meta_error, &self.meta_error_shown) {
+            // Only what the user has really been shown counts as reported.
+            if show_toast(window, cx, e) {
+                self.meta_error_shown = listing.meta_error.clone();
             }
+        } else {
             self.meta_error_shown = listing.meta_error.clone();
         }
         self.trainers = listing.trainers;
@@ -891,6 +1077,9 @@ impl Render for MainView {
                 .p_3()
                 .child(
                     v_flex()
+                        .id("trainers")
+                        .role(Role::List)
+                        .aria_label("Trainers")
                         .w_full()
                         .border_1()
                         .border_color(cx.theme().border)
@@ -1038,7 +1227,7 @@ fn show_about_dialog(window: &mut Window, cx: &mut App) {
         focus.apply(window, cx);
         let muted = cx.theme().muted_foreground;
         dialog
-            .title(label("title", ABOUT_TITLE))
+            .title(dialog_title(ABOUT_TITLE))
             .overlay(false)
             .w(px(380.))
             .child(
@@ -1184,11 +1373,14 @@ fn prompt_appid_for_queue(
         }
         let advance = advance.clone();
         dialog
-            .title(label("title", title.clone()))
+            .title(dialog_title(title.clone()))
             .overlay(false)
             .w(px(420.))
             .child(prompt.clone())
-            // Escape, the close button and a click outside all land here.
+            // Enter belongs to the search field (it picks a game there); the
+            // dialog's own "confirm" would close it as a skip.
+            .on_ok(|_, _, _| false)
+            // Escape and the close button land here.
             .on_close(move |_, window, cx| advance(window, cx))
     });
 }
@@ -1643,18 +1835,25 @@ fn show_game_picker(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let games: Rc<[(u32, SharedString)]> = games
+    // Each game's button with its own focus, so Enter can pick the one the
+    // focus is on (see `EnterKey`).
+    let games: Rc<[(u32, SharedString, FocusHandle)]> = games
         .into_iter()
-        .map(|game| (game.appid, SharedString::from(game.name)))
+        .map(|game| (game.appid, SharedString::from(game.name), cx.focus_handle()))
         .collect();
-    let focus = InitialFocus::new(cx);
+    let cancel_focus = cx.focus_handle();
+    let first = Cell::new(true);
     window.open_dialog(cx, move |dialog, window, cx| {
-        focus.apply(window, cx);
-        let buttons = games.iter().enumerate().map(|(index, (appid, name))| {
+        if first.replace(false) {
+            if let Some((_, _, focus)) = games.first() {
+                focus.focus(window, cx);
+            }
+        }
+        let buttons = games.iter().map(|(appid, name, focus)| {
             let appid = *appid;
             let proceed = proceed.clone();
             Button::new(("game", appid as usize))
-                .when(index == 0, |button| button.track_focus(&focus.handle))
+                .track_focus(focus)
                 .label(name.clone())
                 .w_full()
                 .on_click(move |_, window, cx| {
@@ -1662,10 +1861,29 @@ fn show_game_picker(
                     resolve_target_then(appid, proceed.clone(), window, cx);
                 })
         });
+        let (enter_games, enter_proceed) = (games.clone(), proceed.clone());
+        let on_cancel = cancel_focus.clone();
         dialog
-            .title(label("title", PICKER_TITLE))
+            .title(dialog_title(PICKER_TITLE))
             .overlay(false)
             .w(px(380.))
+            .on_ok(move |_, window, cx| {
+                let focused = enter_games
+                    .iter()
+                    .find(|(_, _, focus)| focus.is_focused(window))
+                    .map(|(appid, _, _)| *appid);
+                match focused {
+                    Some(appid) => {
+                        let proceed = enter_proceed.clone();
+                        window.defer(cx, move |window, cx| {
+                            resolve_target_then(appid, proceed, window, cx)
+                        });
+                        true
+                    }
+                    // Enter on Cancel cancels; anywhere else it picks nothing.
+                    None => on_cancel.is_focused(window),
+                }
+            })
             .child(
                 named_group("game-picker", PICKER_TITLE)
                     .gap_2()
@@ -1678,6 +1896,7 @@ fn show_game_picker(
                         dialog_buttons().child(
                             Button::new("game-cancel")
                                 .label("Cancel")
+                                .track_focus(&cancel_focus)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         ),
                     ),
@@ -1807,10 +2026,14 @@ only; using one online can get your account banned."
     )
     .into();
     show_confirm_dialog(
-        "anticheat",
-        "Online Anti-Cheat",
-        body,
-        "Launch Anyway",
+        Question {
+            id: "anticheat",
+            title: "Online Anti-Cheat",
+            body,
+            ok_text: "Launch Anyway",
+            // As in every release before: the safe answer is the default.
+            default: DefaultButton::Cancel,
+        },
         on_continue,
         window,
         cx,
@@ -1966,6 +2189,7 @@ impl Render for DotnetPrompt {
                             .id("dotnet-commands")
                             .max_h(px(220.))
                             .overflow_y_scroll()
+                            .child(Unseen("dotnet-commands-spoken", self.commands.clone()))
                             .child(
                                 TextView::markdown(
                                     "dotnet-commands-text",
@@ -2016,10 +2240,11 @@ commands below yourself, then launch the trainer again."
     let state = Rc::new(RefCell::new(Some((target, trainer, guard))));
 
     let focus = InitialFocus::new(cx);
+    let cancel_focus = cx.focus_handle();
     window.open_dialog(cx, move |dialog, window, cx| {
         focus.apply(window, cx);
         let dialog = dialog
-            .title(label("title", DOTNET_TITLE))
+            .title(dialog_title(DOTNET_TITLE))
             .overlay(false)
             .w(px(440.));
         let content = named_group("dotnet", DOTNET_TITLE).child(
@@ -2031,6 +2256,9 @@ commands below yourself, then launch the trainer again."
                 .overflow_y_scrollbar(),
         );
         if !automatic {
+            let on_close_button = focus.handle.clone();
+            // Enter closes only from the Close button, not from the commands.
+            let dialog = dialog.on_ok(move |_, window, _| on_close_button.is_focused(window));
             return dialog.child(
                 content.child(
                     dialog_buttons().child(
@@ -2056,12 +2284,21 @@ commands below yourself, then launch the trainer again."
             }
         };
         let enter = set_up.clone();
+        let enter_cancel = state.clone();
         let cancel = state.clone();
         let dismissed = state.clone();
+        let (on_action, on_cancel) = (focus.handle.clone(), cancel_focus.clone());
         dialog
-            // Enter and the Set Up button both confirm.
+            // Enter: what the focused button says (see `EnterKey`); on the
+            // commands' disclosure or copy button it decides nothing.
             .on_ok(move |_, window, cx| {
-                enter(window, cx);
+                match enter_key(on_action.is_focused(window), on_cancel.is_focused(window)) {
+                    EnterKey::Confirm => enter(window, cx),
+                    EnterKey::Cancel => {
+                        enter_cancel.borrow_mut().take();
+                    }
+                    EnterKey::Nothing => return false,
+                }
                 true
             })
             // Escape and the close button drop the pending launch with the dialog.
@@ -2071,12 +2308,15 @@ commands below yourself, then launch the trainer again."
             .child(
                 content.child(
                     dialog_buttons()
-                        .child(Button::new("dotnet-cancel").label("Cancel").on_click(
-                            move |_, window, cx| {
-                                cancel.borrow_mut().take();
-                                window.close_dialog(cx);
-                            },
-                        ))
+                        .child(
+                            Button::new("dotnet-cancel")
+                                .label("Cancel")
+                                .track_focus(&cancel_focus)
+                                .on_click(move |_, window, cx| {
+                                    cancel.borrow_mut().take();
+                                    window.close_dialog(cx);
+                                }),
+                        )
                         .child(
                             Button::new("dotnet-setup")
                                 .primary()
@@ -2188,10 +2428,13 @@ trainer."
     let body: SharedString = body.into();
 
     show_confirm_dialog(
-        "quit-game",
-        "Quit the Game to Continue",
-        body,
-        "Install",
+        Question {
+            id: "quit-game",
+            title: "Quit the Game to Continue",
+            body,
+            ok_text: "Install",
+            default: DefaultButton::Action,
+        },
         // Cancelling drops this, and with it the pending-launch marker.
         Box::new(move |window, cx| run_installer(target, guard, window, cx)),
         window,
@@ -2264,7 +2507,64 @@ fn run_installer(
 
 #[cfg(test)]
 mod tests {
-    use super::{first_installed, untrack, PrefixRepair, MONO_FONTS, UI_FONTS};
+    use super::{
+        enter_key, first_installed, unreported, untrack, EnterKey, PrefixRepair, MONO_FONTS,
+        UI_FONTS,
+    };
+    use super::{helper_showed, no_window_message};
+
+    #[test]
+    fn an_error_dialog_that_was_seen_is_not_shown_twice() {
+        assert!(helper_showed("zenity", Some(0)));
+        assert!(
+            helper_showed("zenity", Some(1)),
+            "closed without OK: still seen"
+        );
+        assert!(helper_showed("kdialog", Some(1)));
+        assert!(
+            !helper_showed("zenity", Some(255)),
+            "could not open a display"
+        );
+        assert!(!helper_showed("kdialog", None), "killed by a signal");
+        assert!(helper_showed("notify-send", Some(0)));
+        assert!(
+            !helper_showed("notify-send", Some(1)),
+            "no notification service"
+        );
+    }
+
+    #[test]
+    fn the_no_window_message_names_the_real_cause() {
+        let gpu = no_window_message("x", true);
+        assert!(gpu.contains("graphics driver") && gpu.ends_with("Details: x"));
+        let headless = no_window_message("x", false);
+        assert!(headless.contains("no display") && !headless.contains("graphics driver"));
+    }
+
+    #[test]
+    fn enter_acts_as_the_focused_button() {
+        assert_eq!(enter_key(true, false), EnterKey::Confirm);
+        assert_eq!(
+            enter_key(false, true),
+            EnterKey::Cancel,
+            "Enter on Cancel cancels"
+        );
+        assert_eq!(
+            enter_key(false, false),
+            EnterKey::Nothing,
+            "Enter on anything else decides nothing"
+        );
+    }
+
+    #[test]
+    fn a_trainers_file_problem_is_reported_until_it_was_shown() {
+        let damaged = Some("trainers.json is damaged".to_string());
+        assert_eq!(unreported(&damaged, &None), damaged.as_ref());
+        assert_eq!(unreported(&damaged, &damaged), None, "shown once");
+        assert_eq!(unreported(&None, &damaged), None, "nothing wrong any more");
+        let other = Some("another problem".to_string());
+        assert_eq!(unreported(&other, &damaged), other.as_ref());
+    }
 
     #[test]
     fn fonts_are_the_first_installed_of_the_list() {
