@@ -651,11 +651,14 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     // that raises the window (see activation.rs). Without a token, or off
     // Wayland, GPUI's own request is what there is; a Wayland compositor then
     // marks the window as wanting attention instead of raising it.
-    // From the first drawn frame on, later launches get "ok" without being
-    // told this copy is still starting.
+    // Once the first frame has been drawn and presented, later launches get
+    // "ok" without being told this copy is still starting. GPUI runs
+    // next-frame callbacks at the start of a frame request, before that
+    // frame is drawn: the first callback only asks for the next frame, and
+    // the second one (after the first frame is up on screen) sets `up`.
     let up = activations.up_signal();
     let _ = window.update(cx, |_, window, _| {
-        window.on_next_frame(move |_, _| up.set())
+        window.on_next_frame(move |window, _| window.on_next_frame(move |_, _| up.set()))
     });
     cx.spawn(async move |cx| {
         while let Some(request) = activations.recv().await {

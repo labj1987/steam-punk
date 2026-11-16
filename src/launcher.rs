@@ -1432,7 +1432,7 @@ pub fn process_group_alive(pgid: u32) -> bool {
 /// then SIGKILL after a ~2s grace period if it hasn't exited. Only a group
 /// this app launched and still tracks is ever signalled (see
 /// `LaunchRecord`). Blocks for up to that grace period — call via
-/// `spawn_blocking`, not on the GTK thread.
+/// `spawn_blocking`, not on the UI thread.
 pub fn stop_trainer(pgid: u32) {
     match launches().get_mut(&pgid) {
         Some(rec) => rec.stopping = true,
