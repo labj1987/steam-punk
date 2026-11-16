@@ -86,7 +86,7 @@ pub fn run_system_setup() -> Result<()> {
 
     let (status, stderr) = if current {
         crate::applog::log("run_system_setup: launching pkexec privileged-setup.sh");
-        run_pkexec(crate::host_env::command("pkexec").arg(SCRIPT))
+        run_pkexec(Command::new("pkexec").arg(SCRIPT))
     } else {
         // polkit can only show the policy's own message once the policy is
         // installed, so this one prompt (which installs it) is pkexec's
@@ -100,7 +100,7 @@ pub fn run_system_setup() -> Result<()> {
         std::fs::write(&staged_script, SCRIPT_BYTES).context("staging the setup script")?;
         std::fs::write(&staged_policy, POLICY_BYTES).context("staging the polkit policy")?;
         run_pkexec(
-            crate::host_env::command("pkexec")
+            Command::new("pkexec")
                 .args(["/bin/bash", "-c", INSTALLER, "bash"])
                 .arg(&staged_script)
                 .arg(SCRIPT)
@@ -215,7 +215,7 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
         wine.shell_env(),
         WINETRICKS_ARGS.join(" ")
     ));
-    let mut cmd = crate::host_env::command("winetricks");
+    let mut cmd = Command::new("winetricks");
     wine.apply(&mut cmd);
     cmd.args(WINETRICKS_ARGS);
     let output = match launcher::run_with_timeout(
@@ -241,7 +241,7 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     // The wineserver winetricks started writes the registry out when it
     // exits, a few seconds after the last wine process; wait for that, so the
     // check that follows reads the final state.
-    let mut wait = crate::host_env::command(wine.wineserver());
+    let mut wait = Command::new(wine.wineserver());
     wine.apply(&mut wait);
     wait.arg("-w");
     let waited = launcher::run_with_timeout(
@@ -278,7 +278,7 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
 /// (`wineserver -k`, Proton's own). Only used once the game is closed, when
 /// whatever runs in the prefix is the installer's.
 fn stop_prefix_wine(wine: &ProtonWine) {
-    let mut kill = crate::host_env::command(wine.wineserver());
+    let mut kill = Command::new(wine.wineserver());
     wine.apply(&mut kill);
     kill.arg("-k");
     let r = launcher::run_with_timeout(
