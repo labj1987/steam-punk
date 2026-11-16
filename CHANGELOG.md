@@ -19,7 +19,8 @@ headings. 0.4.6 was built but never released; it is kept under 0.4.7, which firs
 - In the anti-cheat warning, Cancel is the default again, and Enter always acts on the button that
   has the focus.
 - Starting Steam Punk a second time from your launcher brings the open window to the front on
-  Wayland too.
+  KDE Plasma Wayland too. GNOME shows a "Steam Punk is ready" notice instead, as it does for
+  other apps; click it to switch to the window.
 - Notifications now appear at the bottom of the window, clear of the Launch and Stop buttons.
 - The file dialog now shows all files, not only `.exe` files; picking or dropping anything else is
   refused with a message.
