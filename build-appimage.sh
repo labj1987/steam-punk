@@ -292,16 +292,64 @@ libcheck_plain() {
     echo "${t//>/›}"
 }
 
+# libcheck_gvariant TEXT: TEXT as a GVariant text-format string, for gdbus.
+libcheck_gvariant() {
+    local t
+    # Unquoted on purpose: inside double quotes $'\n' is not a newline.
+    t=${1//\\/\\\\}
+    t=${t//\'/\\\'}
+    t=${t//$'\n'/\\n}
+    printf "'%s'" "$t"
+}
+
+# libcheck_no_display TEXT: whether a dialog program's stderr TEXT says it could not open the display.
+libcheck_no_display() {
+    [[ "$1" == *"Failed to open display"* || "$1" == *"annot open display"* ]]
+}
+
+# libcheck_dialog PROGRAM ARG...: runs a dialog program; 0 when it showed its message (it ended
+# with 0 or 1 and did not say it could not open the display). Its stderr goes to a temporary file
+# read once it has ended: reading a pipe to its end would also wait for anything it left running.
+libcheck_dialog() {
+    local rc=0 errf err=""
+    errf="$(mktemp 2>/dev/null)" || errf=""
+    "$@" </dev/null >/dev/null 2>"${errf:-/dev/null}" || rc=$?
+    if [[ -n "$errf" ]]; then
+        err="$(<"$errf")"
+        rm -f "$errf"
+    fi
+    ((rc <= 1)) && ! libcheck_no_display "$err"
+}
+
+# libcheck_show TITLE TEXT: TEXT on stderr and, in a desktop session, in the first of these that
+# shows it: zenity, kdialog (both end with 0 or 1 once seen), a notification through notify-send or
+# straight over D-Bus with gdbus (0: the desktop took it; Pop!_OS COSMIC has gdbus but no
+# notify-send; expiry 0, for both, keeps it up until it is closed, COSMIC drops others after seconds), and
+# xmessage. The app's own message without a window (src/notice.rs) tries the same, in this order.
 libcheck_show() {
+    local plain
     printf '%s: %s\n' "$1" "$2" >&2
     [[ "${LIBCHECK_DIALOG:-}" == none ]] && return 0
     [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || return 0
+    plain="$(libcheck_plain "$2")"
     if command -v zenity >/dev/null 2>&1; then
-        zenity --error --no-markup --title="$1" --text="$2" --width=460 >/dev/null 2>&1
-    elif command -v kdialog >/dev/null 2>&1; then
-        kdialog --error "$(libcheck_plain "$2")" --title "$1" >/dev/null 2>&1
-    elif command -v notify-send >/dev/null 2>&1; then
-        notify-send -u critical "$1" "$(libcheck_plain "$2")" >/dev/null 2>&1
+        # zenity that can't open the display also ends with 1, and says so.
+        libcheck_dialog zenity --error --no-markup --title="$1" --text="$2" --width=460 && return 0
+    fi
+    if command -v kdialog >/dev/null 2>&1; then
+        libcheck_dialog kdialog --error "$plain" --title "$1" && return 0
+    fi
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical -t 0 "$1" "$plain" </dev/null >/dev/null 2>&1 && return 0
+    fi
+    if command -v gdbus >/dev/null 2>&1; then
+        gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.Notify "$(libcheck_gvariant "$1")" 'uint32 0' "''" \
+            "$(libcheck_gvariant "$1")" "$(libcheck_gvariant "$plain")" '@as []' "{'urgency': <byte 2>}" 'int32 0' \
+            </dev/null >/dev/null 2>&1 && return 0
+    fi
+    if command -v xmessage >/dev/null 2>&1; then
+        xmessage -center -title "$1" "$2" </dev/null >/dev/null 2>&1
     fi
     return 0
 }

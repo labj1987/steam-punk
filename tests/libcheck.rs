@@ -535,3 +535,154 @@ fn libcheck_counts_only_the_binarys_own_symbols() {
     );
     assert!(!ok && err.contains("they lack xkb_x."), "{err}");
 }
+
+/// A fake program that appends its name and arguments, one per line, to `log` and exits with `code`.
+/// (printf, not echo: dash's echo would turn the message's backslashes into escapes.)
+fn fake(bin: &Path, name: &str, log: &Path, code: i32) {
+    script_file(
+        &bin.join(name),
+        &format!(
+            "#!/bin/sh\n{{ echo \"== {name}\"; printf '%s\\n' \"$@\"; }} >> '{}'\nexit {code}\n",
+            log.display()
+        ),
+    );
+}
+
+/// Runs `libcheck_show` with only the programs in `bin` (and bash's own
+/// builtins, mktemp and rm) available, on a display. Returns what the fakes logged.
+fn show_with(bin: &Path, log: &Path, title: &str, text: &str) -> String {
+    // libcheck_dialog's temporary file for a dialog's stderr.
+    for tool in ["mktemp", "rm"] {
+        let link = bin.join(tool);
+        if !link.exists() {
+            std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), link).unwrap();
+        }
+    }
+    let script = format!("{}\nlibcheck_show \"$1\" \"$2\"\n", block());
+    let out = Command::new("/bin/bash")
+        .args(["-c", &script, "bash", title, text])
+        .env("PATH", bin)
+        .env("DISPLAY", ":9999")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("LIBCHECK_DIALOG")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(text));
+    std::fs::read_to_string(log).unwrap_or_default()
+}
+
+/// The programs a run called, in order.
+fn called(calls: &str) -> Vec<&str> {
+    calls
+        .lines()
+        .filter_map(|line| line.strip_prefix("== "))
+        .collect()
+}
+
+#[test]
+fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
+    let dir = scratch("show-order");
+    let log = dir.join("log");
+    // Each one fails (a dialog: no display, exit 255; a notification: no service, exit 1):
+    // the next is tried, in this order.
+    fake(&dir, "zenity", &log, 255);
+    fake(&dir, "kdialog", &log, 255);
+    fake(&dir, "notify-send", &log, 1);
+    fake(&dir, "gdbus", &log, 1);
+    fake(&dir, "xmessage", &log, 0);
+    let calls = show_with(&dir, &log, "Steam Punk", "Broken.");
+    assert_eq!(
+        called(&calls),
+        ["zenity", "kdialog", "notify-send", "gdbus", "xmessage"],
+        "{calls}"
+    );
+    assert!(
+        calls.ends_with("== xmessage\n-center\n-title\nSteam Punk\nBroken.\n"),
+        "{calls}"
+    );
+    // zenity that can't open the display ends with 1 as well, and says so: not shown.
+    std::fs::remove_file(&log).unwrap();
+    script_file(
+        &dir.join("zenity"),
+        &format!(
+            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :0' >&2\nexit 1\n",
+            log.display()
+        ),
+    );
+    assert_eq!(
+        called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
+        ["zenity", "kdialog"]
+    );
+    // A dialog that leaves a process holding its stderr is not waited for.
+    std::fs::remove_file(&log).unwrap();
+    script_file(
+        &dir.join("zenity"),
+        &format!(
+            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :9999' >&2\nsleep 5 &\nexit 1\n",
+            log.display()
+        ),
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
+        ["zenity", "kdialog"]
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // A dialog closed with its X (exit 1) was seen: nothing else is shown.
+    std::fs::remove_file(&log).unwrap();
+    fake(&dir, "zenity", &log, 1);
+    assert_eq!(
+        called(&show_with(&dir, &log, "Steam Punk", "x")),
+        ["zenity"]
+    );
+    // A notification the desktop took ends it too.
+    std::fs::remove_file(&log).unwrap();
+    std::fs::remove_file(dir.join("zenity")).unwrap();
+    fake(&dir, "notify-send", &log, 0);
+    let calls = show_with(&dir, &log, "Steam Punk", "x");
+    assert_eq!(called(&calls), ["kdialog", "notify-send"]);
+    assert!(
+        calls.contains("== notify-send\n-u\ncritical\n-t\n0\n"),
+        "stays until closed: {calls}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_zenity_kdialog_or_notify_send_the_message_goes_over_dbus() {
+    // Pop!_OS COSMIC: no zenity, kdialog or notify-send, but gdbus and a notification service.
+    let dir = scratch("show-gdbus");
+    let log = dir.join("log");
+    fake(&dir, "gdbus", &log, 0);
+    fake(&dir, "xmessage", &log, 0);
+    let calls = show_with(&dir, &log, "Steam Punk", "It's <missing>\\ & \"x\"\nline 2");
+    assert!(
+        calls.starts_with("== gdbus\ncall\n--session\n--dest\norg.freedesktop.Notifications\n"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(
+            "\norg.freedesktop.Notifications.Notify\n'Steam Punk'\nuint32 0\n''\n'Steam Punk'\n'It\\'s ‹missing›\\\\ and \"x\"\\nline 2'\n@as []\n{'urgency': <byte 2>}\nint32 0\n"
+        ),
+        "{calls}"
+    );
+    assert!(!calls.contains("xmessage"), "shown once: {calls}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_gdbus_text_escapes_backslashes_quotes_and_newlines() {
+    let script = format!("{}\nprintf '%s' \"$(libcheck_gvariant \"$1\")\"\n", block());
+    let text = "it's a\\b \"q\"\nnext";
+    let out = Command::new("/bin/bash")
+        .args(["-c", &script, "bash", text])
+        .output()
+        .unwrap();
+    let quoted = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(quoted, "'it\\'s a\\\\b \"q\"\\nnext'");
+}

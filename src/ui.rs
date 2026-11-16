@@ -482,58 +482,17 @@ fn show_confirm_dialog(question: Question, on_ok: Continuation, window: &mut Win
 /// driver (not even Mesa's software ones) there is nothing to draw an error
 /// in. Says so through whatever the desktop offers, then exits: a process
 /// left behind with no window would also keep later launches from starting.
-fn no_window(error: &str) -> ! {
-    let has_display = ["WAYLAND_DISPLAY", "DISPLAY"]
-        .into_iter()
-        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
-    let message = no_window_message(error, has_display);
+fn no_window(error: &str, activations: Activations) -> ! {
+    // Later launches must not wait for this copy while the message is up:
+    // close the socket, and drop the requests already queued, so the
+    // launches that sent them see the connection close and start afresh.
+    crate::instance::release();
+    drop(activations);
+    let message = no_window_message(error, crate::notice::has_display());
     eprintln!("steam-punk: {message}");
     applog::log(&format!("UI: {message}"));
-    // With no display there is nowhere to show a dialog either.
-    if has_display {
-        for (program, args) in ERROR_DIALOGS {
-            let status = std::process::Command::new(program)
-                .args(*args)
-                .arg(&message)
-                .status();
-            if status.is_ok_and(|status| helper_showed(program, status.code())) {
-                break;
-            }
-        }
-    }
+    crate::notice::show_error(&message);
     std::process::exit(1);
-}
-
-/// The programs tried, in order, to show an error when the app has no window.
-const ERROR_DIALOGS: &[(&str, &[&str])] = &[
-    ("kdialog", &["--title", "Steam Punk", "--error"]),
-    (
-        "zenity",
-        &[
-            "--error",
-            "--no-markup",
-            "--title=Steam Punk",
-            "--width=480",
-            "--text",
-        ],
-    ),
-    (
-        "notify-send",
-        &["--urgency=critical", "--app-name=Steam Punk", "Steam Punk"],
-    ),
-    ("xmessage", &["-center"]),
-];
-
-/// Whether `program`, having ended with exit `code`, did show the message, so
-/// the next one must not show it again. The dialogs end with 0 when the user
-/// pressed their button and 1 when the user closed them another way; both
-/// mean it was seen. Anything else (no display, a crash, a signal) does not.
-/// notify-send shows nothing itself: only 0 says the desktop took the message.
-fn helper_showed(program: &str, code: Option<i32>) -> bool {
-    match program {
-        "notify-send" => code == Some(0),
-        _ => matches!(code, Some(0 | 1)),
-    }
 }
 
 fn no_window_message(error: &str, has_display: bool) -> String {
@@ -645,11 +604,8 @@ pub fn init(cx: &mut App) {
 
 pub fn build_ui(cx: &mut App, mut activations: Activations) {
     // With no display GPUI would run on with no window and no word about it.
-    if ["WAYLAND_DISPLAY", "DISPLAY"]
-        .into_iter()
-        .all(|name| std::env::var_os(name).is_none_or(|value| value.is_empty()))
-    {
-        no_window("no display server to connect to");
+    if !crate::notice::has_display() {
+        no_window("no display server to connect to", activations);
     }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(480.), px(560.)), cx)),
@@ -673,7 +629,7 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     });
     let (window, view) = match opened {
         Ok(opened) => opened,
-        Err(e) => no_window(&format!("{e:#}")),
+        Err(e) => no_window(&format!("{e:#}"), activations),
     };
     // The first read of the trainers, now that the window can show what is
     // wrong with them.
@@ -683,6 +639,8 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
 
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
+            // A launch from now on starts a new copy instead of asking this one.
+            crate::instance::release();
             cx.quit();
         }
     })
@@ -693,16 +651,28 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     // that raises the window (see activation.rs). Without a token, or off
     // Wayland, GPUI's own request is what there is; a Wayland compositor then
     // marks the window as wanting attention instead of raising it.
+    // From the first drawn frame on, later launches get "ok" without being
+    // told this copy is still starting.
+    let up = activations.up_signal();
+    let _ = window.update(cx, |_, window, _| {
+        window.on_next_frame(move |_, _| up.set())
+    });
     cx.spawn(async move |cx| {
-        while let Some(token) = activations.recv().await {
-            let _ = window.update(cx, |_, window, _| {
-                let raised = token
+        while let Some(request) = activations.recv().await {
+            let shown = window.update(cx, |_, window, _| {
+                let raised = request
+                    .token
                     .as_deref()
                     .is_some_and(|token| crate::activation::activate(window, token));
                 if !raised {
                     window.activate_window();
                 }
             });
+            // The launch that asked waits for this; without it, it reports
+            // this copy as not responding.
+            if shown.is_ok() {
+                request.done();
+            }
         }
     })
     .detach();
@@ -1239,7 +1209,9 @@ fn show_about_dialog(window: &mut Window, cx: &mut App) {
                             .overflow_y_scroll()
                             .gap_1()
                             .items_center()
-                            .child(img(icon.clone()).w(px(64.)).h(px(64.)))
+                            // Fixed size: in the scrolling column it would otherwise
+                            // shrink when the dialog is short (to 16 px on a small screen).
+                            .child(img(icon.clone()).size(px(64.)).flex_none())
                             .child(
                                 div()
                                     .text_xl()
@@ -2578,31 +2550,11 @@ fn run_installer(
 
 #[cfg(test)]
 mod tests {
+    use super::no_window_message;
     use super::{
         enter_key, first_installed, unreported, untrack, EnterKey, PrefixRepair, MONO_FONTS,
         UI_FONTS,
     };
-    use super::{helper_showed, no_window_message};
-
-    #[test]
-    fn an_error_dialog_that_was_seen_is_not_shown_twice() {
-        assert!(helper_showed("zenity", Some(0)));
-        assert!(
-            helper_showed("zenity", Some(1)),
-            "closed without OK: still seen"
-        );
-        assert!(helper_showed("kdialog", Some(1)));
-        assert!(
-            !helper_showed("zenity", Some(255)),
-            "could not open a display"
-        );
-        assert!(!helper_showed("kdialog", None), "killed by a signal");
-        assert!(helper_showed("notify-send", Some(0)));
-        assert!(
-            !helper_showed("notify-send", Some(1)),
-            "no notification service"
-        );
-    }
 
     #[test]
     fn the_no_window_message_names_the_real_cause() {

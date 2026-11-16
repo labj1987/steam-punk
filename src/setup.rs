@@ -81,6 +81,10 @@ fn installed_matches(path: &str, bytes: &[u8]) -> bool {
 /// the same pkexec call (see `scripts/install-privileged.sh`). Bails with a
 /// clear message if pkexec/polkit isn't available or the user cancels.
 pub fn run_system_setup() -> Result<()> {
+    if !on_path("pkexec") {
+        crate::applog::log("run_system_setup: pkexec is not installed");
+        bail!("{}", NO_PKEXEC_MESSAGE);
+    }
     let current =
         installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
 
@@ -114,17 +118,30 @@ pub fn run_system_setup() -> Result<()> {
 
     crate::applog::log(&format!("run_system_setup: pkexec exited {status:?}"));
     if !status.success() {
-        let code = status.code().unwrap_or(-1);
-        if code == 127 && no_agent(&stderr) {
-            bail!("{}", NO_AGENT_MESSAGE);
-        }
-        if code == 126 || code == 127 {
-            bail!("Authentication was cancelled.");
-        }
-        bail!("Script exited with code {} (see {})", code, LOGFILE);
+        bail!("{}", failure_message(status.code().unwrap_or(-1), &stderr));
     }
     Ok(())
 }
+
+/// Why the setup did not complete, from pkexec's exit `code` and what it
+/// printed. 126 is a dismissed prompt (COSMIC's and GNOME's agents);
+/// polkit-kde-agent reports its Cancel as 127 "Not authorized". The script
+/// itself never exits with either.
+fn failure_message(code: i32, stderr: &str) -> String {
+    match code {
+        127 if no_agent(stderr) => NO_AGENT_MESSAGE.to_string(),
+        126 => CANCELLED.to_string(),
+        127 if stderr.contains("Not authorized") => CANCELLED.to_string(),
+        127 => "Authorization was cancelled or refused, or pkexec could not run the setup script, so nothing was changed.".to_string(),
+        _ => format!("Script exited with code {code} (see {LOGFILE})"),
+    }
+}
+
+const CANCELLED: &str = "Authorization was cancelled or refused, so nothing was changed.";
+
+/// What a system without pkexec is told. The automatic setup is only offered
+/// where apt-get is (`apt_available`), so the install command is apt's.
+const NO_PKEXEC_MESSAGE: &str = "polkit's pkexec is not installed, so nothing was changed. Install it with: sudo apt install pkexec (and a polkit authentication agent, if your desktop has none), then try again.";
 
 /// pkexec's own complaint when no polkit authentication agent (the program
 /// that shows the admin password dialog) is running, as on a bare Hyprland,
@@ -143,17 +160,38 @@ fn no_agent(stderr: &str) -> bool {
     NO_AGENT_TEXTS.iter().any(|t| stderr.contains(t))
 }
 
-/// Runs pkexec with stdin and stdout as they were and stderr captured, which
-/// is passed on to this process's own stderr afterwards so nothing is lost.
+/// Runs pkexec in a session of its own (see `without_terminal`), with stdin
+/// from /dev/null, stdout as it was and stderr captured, which is passed on
+/// to this process's own stderr afterwards so nothing is lost.
 fn run_pkexec(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus, String)> {
+    without_terminal(cmd);
     let out = cmd
-        .stdin(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::piped())
         .output()?;
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     eprint!("{stderr}");
     Ok((out.status, stderr))
+}
+
+/// Starts `cmd` in a session of its own, with no controlling terminal. An app
+/// started on a desktop that was itself started from a text console (Hyprland
+/// or sway run from tty1) has that console as its controlling terminal; with
+/// no polkit agent running, pkexec would then ask for the password there, on a
+/// console nobody looks at, and wait for ever. Without a terminal it fails at
+/// once with its "no agent" message. A running agent shows its dialog as
+/// before: polkit goes by the login session, not the terminal.
+fn without_terminal(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: the closure runs in the child between fork and exec and only
+    // calls setsid(2), which is async-signal-safe and allocates nothing.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 }
 
 /// A private temp dir for the staged copies, removed on drop.
@@ -365,6 +403,67 @@ mod tests {
             NO_AGENT_MESSAGE.contains("hyprpolkitagent")
                 && NO_AGENT_MESSAGE.contains("nothing was changed")
         );
+    }
+
+    #[test]
+    fn pkexec_runs_in_its_own_session_with_no_terminal_and_no_stdin() {
+        // A stand-in for pkexec that reports its PID, session ID, terminal
+        // and stdin on stderr, which run_pkexec captures.
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "read -r line < /proc/$$/stat; set -- ${line##*) }; echo \"$$ $4 $5 $(readlink /proc/$$/fd/0)\" >&2; exit 126",
+        ]);
+        let (status, stderr) = run_pkexec(&mut cmd).unwrap();
+        assert_eq!(status.code(), Some(126), "pkexec's exit status comes back");
+        let fields: Vec<&str> = stderr.split_whitespace().collect();
+        assert_eq!(fields.len(), 4, "{stderr}");
+        assert_eq!(fields[1], fields[0], "a session of its own: {stderr}");
+        assert_eq!(fields[2], "0", "no controlling terminal: {stderr}");
+        assert_eq!(fields[3], "/dev/null", "{stderr}");
+    }
+
+    #[test]
+    fn the_setup_failure_reads_right_for_every_desktop() {
+        // COSMIC's and GNOME's agents: 126 for a dismissed prompt.
+        assert_eq!(
+            failure_message(
+                126,
+                "Error executing command as another user: Request dismissed\n"
+            ),
+            CANCELLED
+        );
+        // polkit-kde-agent's Cancel: 127 "Not authorized".
+        assert_eq!(
+            failure_message(
+                127,
+                "Error executing command as another user: Not authorized\n\nThis incident has been reported.\n"
+            ),
+            CANCELLED
+        );
+        assert!(CANCELLED.contains("cancelled or refused"));
+        assert_eq!(
+            failure_message(127, "Error creating textual authentication agent: Error opening current controlling terminal for the process (`/dev/tty'): No such device or address\n"),
+            NO_AGENT_MESSAGE
+        );
+        assert_eq!(
+            failure_message(127, "No authentication agent found.\n"),
+            NO_AGENT_MESSAGE
+        );
+        assert!(failure_message(127, "pkexec: something else\n")
+            .starts_with("Authorization was cancelled or refused, or pkexec could not run"));
+        assert_eq!(
+            failure_message(3, ""),
+            format!("Script exited with code 3 (see {LOGFILE})")
+        );
+    }
+
+    #[test]
+    fn a_missing_pkexec_is_named_with_the_install_command() {
+        assert!(NO_PKEXEC_MESSAGE
+            .starts_with("polkit's pkexec is not installed, so nothing was changed. "));
+        assert!(NO_PKEXEC_MESSAGE.contains("sudo apt install pkexec"));
+        assert!(!NO_PKEXEC_MESSAGE.contains("uthorization"));
     }
 
     #[test]
