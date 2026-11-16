@@ -5,6 +5,7 @@ mod gamedata;
 mod instance;
 mod launcher;
 mod library;
+mod notice;
 mod setup;
 mod steam;
 mod ui;
@@ -32,9 +33,44 @@ pub fn runtime() -> &'static Runtime {
 /// `log` crate; they go to stderr so a terminal or the journal shows them.
 struct StderrLog;
 
+/// Libraries whose info and debug lines are about their own workings (zbus
+/// prints its whole D-Bus handshake, raw bytes and all, at info), not about
+/// anything the app or the user can act on: only their warnings and errors
+/// are shown, whatever STEAM_PUNK_LOG asks for.
+const NOISY: [&str; 16] = [
+    "zbus",
+    "zbus_names",
+    "zvariant",
+    "ashpd",
+    "tracing",
+    "polling",
+    "async_io",
+    "async_executor",
+    "calloop",
+    "mio",
+    "reqwest",
+    "hyper",
+    "hyper_util",
+    "h2",
+    "rustls",
+    "naga",
+];
+
+/// Whether a line at `level` from `target` (a module path) is shown when
+/// `max` is asked for.
+fn shown(target: &str, level: log::Level, max: log::LevelFilter) -> bool {
+    let crate_name = target.split("::").next().unwrap_or(target);
+    let max = if NOISY.contains(&crate_name) {
+        max.min(log::LevelFilter::Warn)
+    } else {
+        max
+    };
+    level <= max
+}
+
 impl log::Log for StderrLog {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        metadata.level() <= log::max_level()
+        shown(metadata.target(), metadata.level(), log::max_level())
     }
 
     fn log(&self, record: &log::Record) {
@@ -56,8 +92,15 @@ fn main() {
     // one to show its window and must not touch the log: truncating it would
     // wipe the running session's log, and with it the offsets that launch
     // diagnoses read the trainer's output back from.
-    let Some(activations) = instance::claim() else {
-        return;
+    let activations = match instance::claim() {
+        instance::Claim::Primary(activations) => activations,
+        instance::Claim::HandedOver => return,
+        instance::Claim::NotResponding(unanswered) => {
+            let message = instance::not_responding_message(unanswered);
+            eprintln!("steam-punk: {message}");
+            notice::show_error(&message);
+            std::process::exit(1);
+        }
     };
     applog::init();
     log::set_logger(&StderrLog).ok();
@@ -75,4 +118,47 @@ fn main() {
             ui::init(cx);
             ui::build_ui(cx, activations);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use log::{Level, LevelFilter};
+
+    #[test]
+    fn noisy_libraries_show_only_their_warnings() {
+        assert!(!super::shown(
+            "zbus::connection::handshake",
+            Level::Info,
+            LevelFilter::Info
+        ));
+        assert!(!super::shown("zbus", Level::Debug, LevelFilter::Debug));
+        assert!(!super::shown(
+            "zvariant::dbus",
+            Level::Debug,
+            LevelFilter::Trace
+        ));
+        assert!(!super::shown(
+            "ashpd::desktop",
+            Level::Info,
+            LevelFilter::Info
+        ));
+        assert!(super::shown(
+            "zbus::connection",
+            Level::Warn,
+            LevelFilter::Info
+        ));
+        assert!(super::shown("ashpd", Level::Error, LevelFilter::Info));
+        assert!(
+            super::shown("gpui_wgpu::renderer", Level::Info, LevelFilter::Info),
+            "the renderer choice is still shown at info"
+        );
+        assert!(
+            !super::shown("gpui", Level::Info, LevelFilter::Warn),
+            "the default stays warnings only"
+        );
+        assert!(
+            super::shown("zbusy", Level::Info, LevelFilter::Info),
+            "whole crate names only"
+        );
+    }
 }

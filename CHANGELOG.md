@@ -4,6 +4,25 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.9.1 — 2026-11-16
+
+- **No more silent hang on Hyprland or sway started from a text console.** With no polkit
+  authentication agent running, the one-time setup used to wait for a password on the console
+  the desktop was started from, where nobody sees it. It now says at once that no agent is
+  running and which one to start. With an agent, its password dialog appears as before.
+- If `pkexec` is not installed, the setup says so and gives the command that installs it on
+  your distribution.
+- Cancelling the password dialog on KDE Plasma now reads "cancelled or refused" too (KDE's
+  agent reports a cancel as "not authorized").
+- **A second start no longer vanishes when the open copy is stuck.** It says that Steam Punk is
+  already running but not responding, with its process number to close it by. A copy that is
+  still starting gets up to 15 seconds to show its window first.
+- **Messages without a window now show on COSMIC.** When a library or the graphics driver is
+  missing, the message now also comes as a desktop notification on desktops without
+  notify-send (Pop!_OS COSMIC), and it stays until you close it.
+- `STEAM_PUNK_LOG=info` no longer fills the terminal with the D-Bus library's own lines.
+- The icon in About keeps its size on small screens.
+
 ## 0.9.0 — 2026-11-15
 
 - **One look on every desktop, and no GTK needed.** Steam Punk now draws its own window instead of

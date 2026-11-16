@@ -60,8 +60,19 @@ error, and saving an AppID fails instead of wiping the file.
   +), AppID search/association, launch/troubleshoot dialogs.
 - `instance.rs` — one running copy per user login: a socket in `XDG_RUNTIME_DIR` (bound under a
   `flock`ed lock file; a socket file is removed only when nobody listens on it); a second
-  launch sends its activation token, asks the first to show its window and exits. Without
-  `XDG_RUNTIME_DIR` there is no single-instance check.
+  launch sends `activate <token>\n` and waits for the answer. The listener thread answers
+  `starting\n` at once until the UI loop has called `Activations::ui_up`; the UI loop answers
+  `ok\n` (`Activation::done`) after it has raised the window. The second launch waits 2 s for
+  any answer and 15 s in all for `ok`; no answer -> `Claim::NotResponding` (main.rs shows
+  `not_responding_message`, "not responding ... (PID n)" or "still starting (process n)", the
+  PID from `SO_PEERCRED`, on stderr and through notice.rs, and exits 1). A connection closed
+  with no answer (EOF or reset: the copy was exiting) retries the claim once, then the launch
+  exits quietly. Without `XDG_RUNTIME_DIR` there is no single-instance check.
+- `notice.rs` — a message with no window of the app's own (no graphics driver, a running copy
+  that does not answer): zenity, kdialog, notify-send, `gdbus` straight to
+  `org.freedesktop.Notifications.Notify` (expiry 0: COSMIC drops others after seconds, and has
+  no notify-send), xmessage; the first that shows it ends the chain. AppRun's `libcheck_show`
+  tries the same programs in the same order (a test compares the two); keep them in step.
 - `activation.rs` — raises the window for that second launch on Wayland: GPUI has no call that
   takes an activation token, so `xdg_activation_v1.activate(token, surface)` is sent on GPUI's
   own connection through the window's raw handles (wayland-client as a guest on the foreign
@@ -82,7 +93,12 @@ error, and saving an AppID fails instead of wiping the file.
 - `setup.rs` — the privileged one-time system-package setup (winetricks,
   cabextract) via `pkexec`, and the winetricks `dotnet48` fallback: system
   packages need root, the winetricks install itself only touches the
-  user-owned wine prefix and needs no privilege escalation.
+  user-owned wine prefix and needs no privilege escalation. pkexec always runs through
+  `run_pkexec`: `setsid` (no controlling terminal) and stdin from /dev/null, so on a desktop
+  started from a text console with no polkit agent it fails at once instead of prompting on
+  that console. No pkexec on PATH -> `no_pkexec_message` (install command per distribution
+  from os-release); 126, and 127 with "Not authorized" (polkit-kde-agent's Cancel) ->
+  "cancelled or refused"; 127 with a no-agent text -> `NO_AGENT_MESSAGE`.
 - `applog.rs` — single per-session log covering launches, setup steps, and
   user actions, at `~/.local/share/steam-punk/steam-punk.log` (unit tests
   log to stderr instead, never to a file). Only the
@@ -171,7 +187,7 @@ libvulkan and libEGL. A cache that does not list glibc (NixOS and the like) says
 is claimed. The message names the glibc version needed and found, or the missing libraries with the
 install command for dnf, zypper, apt or pacman (`libcheck_package` holds the package names: add a
 row when the binary gains a library). A loader that is there with no working driver behind it is
-the app's part: `ui::no_window` shows a dialog through kdialog, zenity, notify-send or xmessage and
+the app's part: `ui::no_window` shows it through `notice::show_error` (see notice.rs) and
 exits. `tests/libcheck.rs` runs the block in bash with a fake ldd, ldconfig and os-release.
 Nothing sets `LD_LIBRARY_PATH` or any toolkit variable, so the programs the app starts (pkexec,
 proton, winetricks) get the user's environment as it is: plain `std::process::Command`.
@@ -256,7 +272,9 @@ checkout:
   switching accessibility on (`org.a11y.Status IsEnabled`).
 - Fonts: `ui::init` names installed families for the UI and fixed-width fonts before the toolkit
   starts; without that GPUI warns about ".SystemUIFont" on every Linux system. Nothing may log at
-  warn level on a normal start (`STEAM_PUNK_LOG=info` shows the renderer picked).
+  warn level on a normal start (`STEAM_PUNK_LOG=info` shows the renderer picked). The logger in
+  main.rs caps chatty dependencies (zbus, zvariant, ashpd, the async and HTTP crates: `NOISY`)
+  at warn whatever `STEAM_PUNK_LOG` asks for; add a crate there when it floods info.
 - The file dialog (portal) has no file-type filter in GPUI: the `.exe` check is after the pick
   and on drop (`NOT_AN_EXE`).
 - Testing the UI without Steam or a game: a scratch `HOME` with a pretend Steam install

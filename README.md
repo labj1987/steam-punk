@@ -103,7 +103,8 @@ Automatic one-time setup
 (`pkexec`); other distributions get the manual commands to run instead.
 If the setup says no polkit authentication agent is running, start one and try again: KDE,
 GNOME and COSMIC include one; on Hyprland use `hyprpolkitagent`, on sway or i3 use
-`polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`.
+`polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`. This also holds
+for a desktop started from a text console: the setup never asks for the password there.
 
 Tested desktops: GNOME, KDE Plasma, Hyprland, sway and COSMIC. Other Wayland and X11 desktops should work too.
 Input methods (IBus and Fcitx 5) work in the search field.
@@ -131,7 +132,8 @@ Input methods (IBus and Fcitx 5) work in the search field.
   "Steam Punk is ready" notice instead, as it does for other apps, and Hyprland refuses
   unless `misc:focus_on_activate` is on); started from a terminal, the desktop only marks the
   window as wanting attention. On X11 the busy cursor of the second start goes away on its
-  own after a few seconds.
+  own after a few seconds. If the open copy does not respond, the second start says so and
+  names its process number; close that process and start Steam Punk again.
 - **KDE Plasma:** while the file dialog is open, the Steam Punk window can be hidden
   behind it; it comes back when the dialog closes.
 

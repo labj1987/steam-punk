@@ -292,16 +292,46 @@ libcheck_plain() {
     echo "${t//>/›}"
 }
 
+# libcheck_gvariant TEXT: TEXT as a GVariant text-format string, for gdbus.
+libcheck_gvariant() {
+    local t
+    # Unquoted on purpose: inside double quotes $'\n' is not a newline.
+    t=${1//\\/\\\\}
+    t=${t//\'/\\\'}
+    t=${t//$'\n'/\\n}
+    printf "'%s'" "$t"
+}
+
+# libcheck_show TITLE TEXT: TEXT on stderr and, in a desktop session, in the first of these that
+# shows it: zenity, kdialog (both end with 0 or 1 once seen), a notification through notify-send or
+# straight over D-Bus with gdbus (0: the desktop took it; Pop!_OS COSMIC has gdbus but no
+# notify-send; expiry 0 keeps it up until it is closed, COSMIC drops others after seconds), and
+# xmessage. The app's own message without a window (src/notice.rs) tries the same, in this order.
 libcheck_show() {
+    local rc plain
     printf '%s: %s\n' "$1" "$2" >&2
     [[ "${LIBCHECK_DIALOG:-}" == none ]] && return 0
     [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || return 0
+    plain="$(libcheck_plain "$2")"
     if command -v zenity >/dev/null 2>&1; then
-        zenity --error --no-markup --title="$1" --text="$2" --width=460 >/dev/null 2>&1
-    elif command -v kdialog >/dev/null 2>&1; then
-        kdialog --error "$(libcheck_plain "$2")" --title "$1" >/dev/null 2>&1
-    elif command -v notify-send >/dev/null 2>&1; then
-        notify-send -u critical "$1" "$(libcheck_plain "$2")" >/dev/null 2>&1
+        rc=0; zenity --error --no-markup --title="$1" --text="$2" --width=460 </dev/null >/dev/null 2>&1 || rc=$?
+        ((rc <= 1)) && return 0
+    fi
+    if command -v kdialog >/dev/null 2>&1; then
+        rc=0; kdialog --error "$plain" --title "$1" </dev/null >/dev/null 2>&1 || rc=$?
+        ((rc <= 1)) && return 0
+    fi
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -u critical "$1" "$plain" </dev/null >/dev/null 2>&1 && return 0
+    fi
+    if command -v gdbus >/dev/null 2>&1; then
+        gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+            --method org.freedesktop.Notifications.Notify "$(libcheck_gvariant "$1")" 'uint32 0' "''" \
+            "$(libcheck_gvariant "$1")" "$(libcheck_gvariant "$plain")" '@as []' "{'urgency': <byte 2>}" 'int32 0' \
+            </dev/null >/dev/null 2>&1 && return 0
+    fi
+    if command -v xmessage >/dev/null 2>&1; then
+        xmessage -center -title "$1" "$2" </dev/null >/dev/null 2>&1
     fi
     return 0
 }
