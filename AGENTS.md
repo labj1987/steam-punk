@@ -9,7 +9,7 @@ dir and log files all use hyphenated lowercase `steam-punk`. The app ID
 (PascalCase) — never rename them. Old names (`steampunk`, `proton-trainer`)
 are gone from the code with no back-compat of any kind — don't add new uses.
 
-GTK4 + libadwaita desktop app, written in Rust, for launching Windows
+Desktop app, written in Rust with the GPUI Kit UI toolkit (see "UI" below), for launching Windows
 game-trainer executables (e.g. FLiNG trainers) through Proton directly
 against a currently running Steam game's existing wine session, on Linux.
 Distributed as a single AppImage.
@@ -54,10 +54,12 @@ error, and saving an AppID fails instead of wiping the file.
 
 ## Module layout (`src/`)
 
-- `main.rs` — entry point, sets up the shared Tokio runtime, wires up the
-  GTK application.
-- `ui.rs` — the GTK4/libadwaita UI: trainer list, import (drag-and-drop or
+- `main.rs` — entry point: claims the single instance, starts the log and the shared Tokio
+  runtime, runs the GPUI application.
+- `ui.rs` — the GPUI Kit UI: trainer list, import (drag-and-drop or
   +), AppID search/association, launch/troubleshoot dialogs.
+- `instance.rs` — one running copy per session: a socket in `XDG_RUNTIME_DIR`; a second
+  launch asks the first to show its window and exits.
 - `launcher.rs` — resolves the running Proton build and compat paths,
   spawns the trainer, and the whole .NET-usability check/repair path (see
   Known quirks below). Largest file in the app.
@@ -76,7 +78,7 @@ error, and saving an AppID fails instead of wiping the file.
 - `applog.rs` — single per-session log covering launches, setup steps, and
   user actions, at `~/.local/share/steam-punk/steam-punk.log` (unit tests
   log to stderr instead, never to a file). Only the
-  primary instance starts (truncates) it, from GApplication `startup`: a
+  primary instance starts (truncates) it, after `instance::claim`: a
   second launch forwards to the running instance and must not wipe its log,
   whose byte offsets the launch diagnosis reads trainer output back from.
 - `fsutil.rs` — `write_atomic` (temp file, fsync, rename, directory fsync),
@@ -149,38 +151,31 @@ just means the caller falls back to the trainer's filename-derived title.
 
 ## Build process
 
-GTK 4 and libadwaita come from the system when it has them, with a bundled copy as the fallback.
-The AppDir holds the binary twice: `usr/bin/steam-punk` as cargo built it (no rpath; the build fails if it
-has one), which loads the system's GTK like releases before the bundle, and `usr/bin/bundled/steam-punk`,
-patched to the bundled runtime. AppRun's `gtk_choice` picks one at launch: the plain binary when
-`ldd -r` on it prints no `not found` line and no unresolved symbol of the binary itself (`undefined
-symbol: X (binary)` or `symbol X version Y not defined ... (binary)`; a system library's own lazy
-symbols don't count) (that also catches a libadwaita
-older than 1.5), the bundled one otherwise and when ldd is absent. `STEAM_PUNK_GTK=host|bundled` overrides the
-check; one stderr line names the copy taken and why. `libcheck_run` then checks the chosen binary
-before any password prompt. The bundle (`bundle_gtk_runtime` in `build-appimage.sh`) is the ldd closure of
-the bundled binary minus the AppImage excludelist (glibc, libstdc++/libgcc_s, GL/EGL/DRM, X11/xcb, Wayland,
-fonts; the script cites the excludelist version) and the Vulkan loader, which also come from the
-system; plus the SVG pixbuf loader only (Ubuntu builds PNG and JPEG into gdk-pixbuf; the build fails
-if that changes), the dconf GIO module and the IBus IM module, with compiled schemas. Licences go to
-`usr/share/doc/bundled-libraries`: each package's copyright file, the `common-licenses` texts they
-name, and `PACKAGES` (the Ubuntu 24.04 source packages and versions they come from; the only change is the ELF rpath). AppRun's
-`libcheck_run` fails on any `not found` line of `ldd -r`, and on unresolved symbols of the binary or of
-anything inside the AppImage (a system library's own lazy ones don't count); when ldd fails without
-naming anything, it asks the loader directly. It names the glibc version needed and found. `gio-launch-desktop` is copied into `usr/bin` (GLib runs every GIO launch
-through it; AppRun puts `usr/bin` on PATH), and `bundle_env` also saves and unsets the system's
-`GTK_PATH` and `GIO_EXTRA_MODULES` (restored for child programs like the others). Libraries are found through
-`$ORIGIN` rpaths set with patchelf, never `LD_LIBRARY_PATH`. On the bundled path only, AppRun's `bundle_env` sets
-`GTK_EXE_PREFIX`, `GDK_PIXBUF_MODULE_FILE`, `GIO_MODULE_DIR` and `GSETTINGS_SCHEMA_DIR` and keeps the
-earlier values in `APPIMAGE_ORIG_*`; every program the app starts must be built with
-`host_env::command` (a test fails on a bare `Command::new` outside test code), which puts them back
-(on the host path nothing is set, so it changes nothing).
+The AppImage holds one binary, as cargo built it, and no libraries. The binary links glibc, libgcc_s,
+libxcb, libxkbcommon and libxkbcommon-x11, and loads by name at run time libwayland-client (Wayland
+sessions), libvulkan and/or libEGL (with libwayland-egl) and then the GPU driver's own libraries; it
+loads no GTK, GLib, Qt, fontconfig or freetype. AppRun's `libcheck_run` checks this before the app
+starts: `ldd -r` on the binary must show no `not found` line and no unresolved symbol of the binary
+itself (a system library's own lazy ones don't count; when ldd fails without naming anything, it
+asks the loader directly), and `libcheck_runtime` looks in the loader cache (`ldconfig -p`, 64-bit
+entries, plus `LD_LIBRARY_PATH`) for libwayland-client on a Wayland session and for at least one of
+libvulkan and libEGL. A cache that does not list glibc (NixOS and the like) says nothing, so nothing
+is claimed. The message names the glibc version needed and found, or the missing libraries with the
+install command for dnf, zypper, apt or pacman (`libcheck_package` holds the package names: add a
+row when the binary gains a library). A loader that is there with no working driver behind it is
+the app's part: `ui::no_window` shows a dialog through kdialog, zenity, notify-send or xmessage and
+exits. `tests/libcheck.rs` runs the block in bash with a fake ldd, ldconfig and os-release.
+Nothing sets `LD_LIBRARY_PATH` or any toolkit variable, so the programs the app starts (pkexec,
+proton, winetricks) get the user's environment as it is: plain `std::process::Command`.
 
 `build-appimage.sh` builds the AppImage, `appimagetool`-direct
 (no `linuxdeploy`). It runs as an ordinary user and writes only inside the
 checkout:
-1. Only on a machine with no toolchain (no cargo or no GTK4 headers) does it
-   install build deps via apt (cargo, rustc, gtk4/adwaita dev headers,
+1. Only on a machine with no toolchain (no cargo, or pkg-config can't find xcb, xkbcommon,
+   xkbcommon-x11 and fontconfig) does it
+   install build deps via apt (cargo, rustc, build-essential, pkg-config, `libxcb1-dev`,
+   `libxkbcommon-dev`, `libxkbcommon-x11-dev`, `libfontconfig1-dev` (one crate probes it at build
+   time; the binary does not load it),
    `wget`, `zsync`, `file`, `desktop-file-utils`); that is the one part
    needing root, run through `sudo` when the script isn't root. In CI the workflow installs the packaging tools, and the
    script stops early if `wget`, `file` or `desktop-file-validate` is missing.
@@ -212,6 +207,48 @@ checkout:
    sidecar (`appimagetool`'s own zsync generation silently no-ops on GitHub Actions
    runners). A missing or failing `zsyncmake` is fatal when `CI` is set (a
    release without the sidecar cannot update); a local build only warns.
+
+## UI (GPUI Kit)
+
+- The toolkit is `gpui-kit`, pinned to an exact version in Cargo.toml (0.9.x releases weekly and
+  pins GPUI itself as the `gpui-pre` snapshot crates). It draws with wgpu: Vulkan first, OpenGL ES
+  through EGL second; Mesa's software drivers count. Bump it on purpose, then re-run the desktop
+  checks below. Its sources are the reference: `~/.cargo/registry/src/*/gpui-component-*`,
+  `gpui-base-*`, `gpui-pre-*`.
+- Shape: one view (`MainView`) and two small views for dialog content that changes while open
+  (`AppIdPrompt`, `DotnetPrompt`). Dialog builders run on every frame (`Fn`), so one-shot state
+  travels in `Rc<RefCell<Option<..>>>`. `spawn_async` runs a future on Tokio and delivers the
+  result on the UI thread.
+- Dialogs: always through `window.open_dialog` with `.overlay(false)` (the toolkit's dimming layer
+  also paints the client-side shadow margin, a dark frame around the window on KDE and GNOME), the
+  content in `named_group(..)`, the buttons in `dialog_buttons()` inside that group (not the
+  toolkit's footer), the main button given the focus with `InitialFocus`, and the text above the
+  buttons capped with `dialog_room(window)` and scrollable: the toolkit cuts off a dialog taller
+  than the window. Run what a button starts with `window.defer` after `close_dialog`, so a
+  follow-up dialog is not the one that gets closed.
+- Screen readers: GPUI reports only elements with an id and a role. Use `label(id, text)` for
+  text (never a bare string child in a dialog), `accessibility_label` on icon buttons and on
+  buttons that repeat per row, and `toast()` for messages (it also feeds the `Announcer` live
+  region; the toolkit's notifications are not announced, upstream issue longbridge/gpui-kit#3659).
+  The toolkit's dialog cannot be named in 0.9.1; `named_group` plus `InitialFocus` is the stand-in.
+  Check with AT-SPI (`Atspi` from Python: tree, FOCUSED state, `object:announcement` events) after
+  switching accessibility on (`org.a11y.Status IsEnabled`).
+- Fonts: `ui::init` names installed families for the UI and fixed-width fonts before the toolkit
+  starts; without that GPUI warns about ".SystemUIFont" on every Linux system. Nothing may log at
+  warn level on a normal start (`STEAM_PUNK_LOG=info` shows the renderer picked).
+- The file dialog (portal) has no file-type filter in GPUI: the `.exe` check is after the pick
+  and on drop (`NOT_AN_EXE`).
+- Testing the UI without Steam or a game: a scratch `HOME` with a pretend Steam install
+  (`steamapps/libraryfolders.vdf`, `appmanifest_<appid>.acf`, `compatdata/<appid>/pfx` with an
+  empty `system.reg`, `config_info` naming a Proton dir) and a sleeping process whose command
+  line holds `SteamLaunch AppId=<appid>` reach every launch dialog: anti-cheat (AppID 3240220),
+  one-time setup, quit-the-game, the pkexec prompt, and the game picker with two such processes.
+  Never do this against the real `HOME`: Launch would start wine in a real prefix. Run GUI checks
+  on a private display or in a VM, with a private `XDG_RUNTIME_DIR`.
+- Before a release, on GNOME, KDE Plasma, Hyprland and COSMIC: start, import by + and by drop,
+  the dialogs above, light/dark switch, polkit prompt and its cancel / no-agent messages; and
+  with no GPU: lavapipe, GLES only, no driver (the app's dialog), no loader (AppRun's message).
+  Retake `screenshots/main.png` when the list's look changes.
 
 ## Rust
 

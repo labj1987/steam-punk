@@ -1,8 +1,8 @@
 # Steam Punk
 
-GTK4 + libadwaita desktop app for launching Windows game-trainer executables
+Desktop app for launching Windows game-trainer executables
 (e.g. FLiNG trainers) through Proton against a currently running Steam
-game's wine session, on Linux.
+game's wine session, on Linux. It looks and works the same on every desktop.
 
 ## Screenshot
 
@@ -82,22 +82,49 @@ winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 
 ## Requirements
 
-GTK 4.12+ and libadwaita 1.5+ from the system are used when they are there, so the
-window looks like the rest of your desktop (theme, accent colour). Without them, or
-with older ones, the AppImage uses the GTK 4 and libadwaita it brings, so it also runs
-on desktops that ship neither (a stock KDE Plasma or Hyprland install); that copy
-(libadwaita 1.5) follows dark mode but not the desktop's accent colour.
-`STEAM_PUNK_GTK=bundled` or `STEAM_PUNK_GTK=host` forces one or the other. Either way it takes the basics every
-desktop has from the system: **glibc 2.39 or newer**, OpenGL/EGL drivers and the Vulkan loader, X11 or
-Wayland client libraries, and fontconfig, freetype, harfbuzz and fribidi (if one is
-missing, the app names it). Automatic one-time setup
+Steam Punk needs no GTK, Qt or other toolkit from the system: it draws its own window,
+the same on every desktop, and follows the desktop's light or dark setting. What it
+takes from the system is what every desktop has:
+
+- **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13 and later).
+- **A graphics driver with Vulkan or OpenGL ES.** Any working GPU driver has one. With
+  no GPU, Mesa's software renderers do (`mesa-vulkan-drivers` on Debian, Ubuntu and
+  Fedora; `vulkan-swrast` on Arch).
+- The X11 and Wayland client libraries: `libxcb`, `libxkbcommon`, `libxkbcommon-x11`,
+  and `libwayland-client` on a Wayland session.
+
+If a library is missing or the system is too old, Steam Punk says which, and how to
+install it, instead of not starting. File dialogs and the light or dark setting come
+through the desktop's portal (`xdg-desktop-portal`); without one, dropping a trainer
+on the window still imports it.
+
+Automatic one-time setup
 (system packages for the .NET install) is Debian/Ubuntu-only and needs polkit
 (`pkexec`); other distributions get the manual commands to run instead.
 If the setup says no polkit authentication agent is running, start one and try again: KDE,
 GNOME and COSMIC include one; on Hyprland use `hyprpolkitagent`, on sway or i3 use
 `polkit-gnome` (`policykit-1-gnome` on Debian/Ubuntu) or `lxqt-policykit`.
 
-Tested desktops: GNOME, KDE Plasma, Hyprland and COSMIC. Other Wayland and X11 desktops should work too.
+Tested desktops: GNOME, KDE Plasma, Hyprland, sway and COSMIC. Other Wayland and X11 desktops should work too.
+Input methods (IBus and Fcitx 5) work in the search field.
+
+## Known issues
+
+- **Screen readers.** Buttons, the trainer list, the search field, all text in dialogs
+  and every notification are exposed, and notifications are announced. A dialog itself
+  has no name: its title names the group that holds its content, where the keyboard
+  focus goes when it opens, and is the first text inside it. The window's minimise, maximise and close
+  buttons and the two links in About are not exposed (close the window with your
+  desktop's shortcut, such as Alt+F4). These are limits of the UI toolkit, GPUI Kit
+  ([longbridge/gpui-kit issue 3659](https://github.com/longbridge/gpui-kit/issues/3659)
+  covers announcements).
+- **The file dialog shows every file**, not only `.exe` files. Picking or dropping
+  anything else is refused with a message.
+- **The font is one your system already has** (Ubuntu, Adwaita Sans, Cantarell, Noto Sans
+  or DejaVu Sans, whichever is found first), not necessarily the one your desktop is
+  set to.
+- **KDE Plasma:** while the file dialog is open, the Steam Punk window can be hidden
+  behind it; it comes back when the dialog closes.
 
 ## Install, update and uninstall
 
@@ -122,11 +149,10 @@ automatic setup ran, also remove `/usr/lib/steam-punk/`, that polkit policy and
 ```
 
 Produces `steam-punk-<version>-x86_64.AppImage` (+ `.zsync` sidecar). Needs
-cargo and the GTK 4 / libadwaita headers (installed with apt, through sudo, if
-missing), `patchelf` and the GTK runtime pieces the AppImage bundles
-(`librsvg2-common`, `dconf-gsettings-backend`, `ibus-gtk4`, `libgdk-pixbuf2.0-bin`,
-`gsettings-desktop-schemas`; release builds run on Ubuntu 24.04), `zsync` for the sidecar, and network access for the pinned
-appimagetool and AppImage runtime it downloads.
+cargo, a C compiler, `pkg-config` and the headers the UI toolkit builds against
+(`libxcb1-dev`, `libxkbcommon-dev`, `libxkbcommon-x11-dev`, `libfontconfig1-dev`; installed
+with apt, through sudo, if missing; release builds run on Ubuntu 24.04), `zsync` for the
+sidecar, and network access for the pinned appimagetool and AppImage runtime it downloads.
 
 ## Non-goals
 

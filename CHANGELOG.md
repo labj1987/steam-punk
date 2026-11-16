@@ -4,6 +4,28 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## Unreleased
+
+- **One look on every desktop, and no GTK needed.** Steam Punk now draws its own window instead of
+  using GTK 4 and libadwaita, so it looks and works the same on GNOME, KDE Plasma, Hyprland, sway,
+  COSMIC and the rest, and it needs neither library from your system. The AppImage no longer
+  carries its own copy of them: it is about 16 MB instead of 36 MB. It follows your desktop's
+  light or dark setting; it no longer takes your GTK theme or accent colour, and
+  `STEAM_PUNK_GTK` no longer does anything.
+- **Requirements changed:** a graphics driver with Vulkan or OpenGL ES (any working GPU driver;
+  with no GPU, Mesa's software renderer), glibc 2.39 or newer, and the X11 and Wayland client
+  libraries every desktop has. If something is missing, Steam Punk says what and how to install it;
+  if no graphics driver works, it says so in a dialog instead of showing nothing.
+- Notifications now appear at the bottom of the window, clear of the Launch and Stop buttons.
+- The file dialog now shows all files, not only `.exe` files; picking or dropping anything else is
+  refused with a message.
+- Screen readers: buttons, trainers, dialog text and notifications are exposed, and notifications
+  are announced. A dialog has no name of its own (its title names the group the keyboard
+  focus goes to when it opens), and the window's own buttons and the About links are not exposed yet (see Known issues in
+  the README).
+- "Show manual commands instead" in the one-time setup dialog now shows the commands in place of
+  the explanation, so they fit the window.
+
 ## 0.8.0 — 2026-11-15
 
 - **A missing password dialog is now named as the problem.** On a desktop with no polkit authentication
