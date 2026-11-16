@@ -83,7 +83,7 @@ winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 ## Requirements
 
 Steam Punk needs no GTK, Qt or other toolkit from the system: it draws its own window,
-the same on every desktop, and follows the desktop's light or dark setting. What it
+the same on every desktop, and follows the desktop's light or dark setting and accent colour. What it
 takes from the system is what every desktop has:
 
 - **glibc 2.39 or newer** (Ubuntu 24.04, Fedora 40, Debian 13 and later).
@@ -94,7 +94,7 @@ takes from the system is what every desktop has:
   and `libwayland-client` on a Wayland session.
 
 If a library is missing or the system is too old, Steam Punk says which, and how to
-install it, instead of not starting. File dialogs and the light or dark setting come
+install it, instead of not starting. File dialogs, the light or dark setting and the accent colour come
 through the desktop's portal (`xdg-desktop-portal`); without one, dropping a trainer
 on the window still imports it.
 
