@@ -482,9 +482,12 @@ fn show_confirm_dialog(question: Question, on_ok: Continuation, window: &mut Win
 /// driver (not even Mesa's software ones) there is nothing to draw an error
 /// in. Says so through whatever the desktop offers, then exits: a process
 /// left behind with no window would also keep later launches from starting.
-fn no_window(error: &str) -> ! {
-    // Later launches must not wait for this copy while the message is up.
+fn no_window(error: &str, activations: Activations) -> ! {
+    // Later launches must not wait for this copy while the message is up:
+    // close the socket, and drop the requests already queued, so the
+    // launches that sent them see the connection close and start afresh.
     crate::instance::release();
+    drop(activations);
     let message = no_window_message(error, crate::notice::has_display());
     eprintln!("steam-punk: {message}");
     applog::log(&format!("UI: {message}"));
@@ -602,7 +605,7 @@ pub fn init(cx: &mut App) {
 pub fn build_ui(cx: &mut App, mut activations: Activations) {
     // With no display GPUI would run on with no window and no word about it.
     if !crate::notice::has_display() {
-        no_window("no display server to connect to");
+        no_window("no display server to connect to", activations);
     }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(480.), px(560.)), cx)),
@@ -626,7 +629,7 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     });
     let (window, view) = match opened {
         Ok(opened) => opened,
-        Err(e) => no_window(&format!("{e:#}")),
+        Err(e) => no_window(&format!("{e:#}"), activations),
     };
     // The first read of the trainers, now that the window can show what is
     // wrong with them.

@@ -52,11 +52,17 @@ fn run(program: &str, args: &[String]) -> Option<(Option<i32>, String)> {
         SERIAL.fetch_add(1, Ordering::Relaxed)
     ));
     let file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&path)
         .ok();
+    // Removed at once: the open file is all that is needed, and nothing is
+    // left behind if this process is killed while the dialog is up.
+    if file.is_some() {
+        let _ = std::fs::remove_file(&path);
+    }
     let stderr = file
         .as_ref()
         .and_then(|file| file.try_clone().ok())
@@ -67,14 +73,14 @@ fn run(program: &str, args: &[String]) -> Option<(Option<i32>, String)> {
         .stdout(std::process::Stdio::null())
         .stderr(stderr)
         .status();
-    let text = match file {
-        Some(_) => {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let _ = std::fs::remove_file(&path);
-            text
+    let mut bytes = Vec::new();
+    if let Some(mut file) = file {
+        use std::io::{Read as _, Seek as _};
+        if file.rewind().is_ok() {
+            let _ = file.read_to_end(&mut bytes);
         }
-        None => String::new(),
-    };
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     status.ok().map(|status| (status.code(), text))
 }
 
@@ -330,6 +336,28 @@ mod tests {
         );
         assert_eq!(code, Some(1));
         assert!(!showed("zenity", code, &stderr), "{stderr}");
+    }
+
+    #[test]
+    fn a_dialogs_stderr_is_read_whatever_its_bytes_and_no_file_is_left() {
+        let (code, stderr) = run(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf '\\377\\376 Failed to open display\\n' >&2; exit 1".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(code, Some(1));
+        assert!(stderr.contains("Failed to open display"), "{stderr:?}");
+        assert!(!showed("zenity", code, &stderr));
+        let prefix = format!("steam-punk-notice-{}-", std::process::id());
+        let left: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 
     #[test]

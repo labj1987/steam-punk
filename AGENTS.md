@@ -69,8 +69,9 @@ error, and saving an AppID fails instead of wiping the file.
   `Claim::NotResponding` ("not responding ... (PID n)", the PID from `SO_PEERCRED`, as an
   error, exit 1). A connection closed with no answer (EOF or reset: the copy is exiting) is
   asked again every 75 ms until nobody listens (this launch becomes the primary) or the 2 s
-  answer wait runs out (exit quietly). `instance::release` shuts the listener and removes the
-  socket file; it runs when the last window closes and before `ui::no_window` shows its
+  answer wait runs out (exit quietly). `instance::release` removes the socket file, then shuts the
+  listener (this order matters: a launch in between finds no file, not a dead socket), and
+  `ui::no_window` also drops `Activations` so queued requests see EOF and retry; it runs when the last window closes and before `ui::no_window` shows its
   message, so no launch waits on a copy that is going away. Without `XDG_RUNTIME_DIR` there is
   no single-instance check.
 - `notice.rs` — a message with no window of the app's own, as an error (no graphics driver, a

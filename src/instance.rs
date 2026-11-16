@@ -362,12 +362,15 @@ fn claim_at(path: &Path, token: Option<String>, waits: Waits) -> Claim {
     // unanswered. Its listener may take a moment more to go away, so ask
     // again in short steps until nobody listens (this launch becomes the
     // primary) or a copy answers; if copies keep going away unanswered for
-    // the whole answer wait, leave quietly rather than call one hung.
-    let deadline = Instant::now() + waits.answer;
+    // the whole answer wait, leave quietly rather than call one hung. That
+    // wait counts from the first closed connection: a copy may have said
+    // "starting" for seconds before it went away.
+    let mut deadline = None;
     loop {
         if let Ok(claim) = try_claim(path, token.as_deref(), waits) {
             return claim;
         }
+        let deadline = *deadline.get_or_insert_with(|| Instant::now() + waits.answer);
         if Instant::now() >= deadline {
             return Claim::HandedOver;
         }
@@ -413,6 +416,11 @@ fn try_claim(path: &Path, token: Option<&str>, waits: Waits) -> Result<Claim, Cl
                             continue;
                         }
                     };
+                    // Released between the accept and now: dropped unanswered,
+                    // so that launch asks again and finds nobody.
+                    if listening.closed.load(Ordering::Acquire) {
+                        break;
+                    }
                     let token = read_request(&connection);
                     if !ui_up.is_set() {
                         let _ = connection.write_all(STARTING);
@@ -663,6 +671,67 @@ mod tests {
         let claim = claim_at(&path, None, waits(2000, 5000));
         exiting.join().unwrap();
         assert!(matches!(claim, Claim::Primary(_)), "not \"not responding\"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_that_dies_after_saying_starting_still_gets_the_retries() {
+        let dir = scratch("starting-dies");
+        let path = dir.join("test.sock");
+        // A copy says "starting", stays silent longer than the answer wait,
+        // then goes away (connection first, socket a moment later).
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let dying = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.write_all(b"starting\n").unwrap();
+                std::thread::sleep(Duration::from_millis(600));
+                drop(stream);
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = std::fs::remove_file(&path);
+                drop(listener);
+            })
+        };
+        // Any answer within 300 ms, "ok" within 5 s: the copy dies 600 ms in.
+        let claim = claim_at(&path, None, waits(300, 5000));
+        dying.join().unwrap();
+        assert!(
+            matches!(claim, Claim::Primary(_)),
+            "retried after the copy went away, and became the primary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launches_queued_at_a_copy_that_gives_up_start_at_once() {
+        let dir = scratch("gives-up");
+        let path = dir.join("test.sock");
+        // The primary's UI never comes up (no window could be opened).
+        let Claim::Primary(first) = claim_at(&path, None, WAIT) else {
+            panic!("primary")
+        };
+        let started = Instant::now();
+        let launch = {
+            let path = path.clone();
+            std::thread::spawn(move || claim_at(&path, None, waits(2000, 15000)))
+        };
+        // Its request is queued (told "starting"); then the copy gives up as
+        // ui::no_window does: release, and drop the requests.
+        std::thread::sleep(Duration::from_millis(300));
+        first.close();
+        drop(first);
+        let claim = launch.join().unwrap();
+        assert!(
+            matches!(claim, Claim::Primary(_)),
+            "not \"still starting\" beside the other copy's error"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
