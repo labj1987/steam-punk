@@ -37,10 +37,16 @@ fn launch_token() -> Option<String> {
         .find(|token| valid_token(token))
 }
 
-/// A token travels as one line, so anything with a line break or control
-/// character in it is not one.
+/// The longest token passed on. Real ones are a few dozen bytes; a Wayland
+/// message holds at most 4096, and a request larger than that makes the
+/// compositor drop the app's whole connection.
+const MAX_TOKEN: usize = 256;
+
+/// A token is a short run of printable ASCII: it travels as one line here
+/// and as a string argument to the compositor, and comes from the
+/// environment, which anything may have set.
 fn valid_token(token: &str) -> bool {
-    !token.is_empty() && token.len() <= 4096 && !token.chars().any(char::is_control)
+    !token.is_empty() && token.len() <= MAX_TOKEN && token.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// `None` when another copy is already running (it has been asked to show
@@ -141,7 +147,7 @@ fn parse_request(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_at, nobody_listening, parse_request, valid_token};
+    use super::{claim_at, nobody_listening, parse_request, valid_token, MAX_TOKEN};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("steam-punk-{name}-{}", std::process::id()));
@@ -229,5 +235,16 @@ mod tests {
         assert_eq!(parse_request(""), None);
         assert_eq!(parse_request("something else\n"), None);
         assert!(!valid_token("a\nb") && !valid_token("") && !valid_token("a\u{7}"));
+        assert!(
+            !valid_token("a b") && !valid_token("tok\u{e9}n"),
+            "printable ASCII only"
+        );
+        assert!(valid_token(&"x".repeat(MAX_TOKEN)));
+        assert!(
+            !valid_token(&"x".repeat(MAX_TOKEN + 1)),
+            "an oversized token must never reach the compositor"
+        );
+        let long = format!("activate {}\n", "x".repeat(MAX_TOKEN + 1));
+        assert_eq!(parse_request(&long), None);
     }
 }

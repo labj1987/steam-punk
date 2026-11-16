@@ -192,7 +192,9 @@ checkout:
 3. Assembles the AppDir (binary, appdata, desktop file, icon, generated
    `AppRun`) and runs `desktop-file-validate` on the copied desktop file
    (fatal). `scripts/third_party_licenses.py` writes the notices of every crate in the build
-   (from `cargo metadata` and the crates' own licence files) to
+   (from `cargo metadata` and the crates' own licence files; for a crate without one, the standard
+   text of each licence its SPDX expression names, kept in `scripts/spdx/`: the build fails when
+   a text is missing there, so add it) to
    `usr/share/licenses/steam-punk/THIRD-PARTY-LICENSES.txt`; CI runs it too.
    `AppRun` only starts the app; it asks for no password. The
    privileged script and polkit policy are compiled into the binary

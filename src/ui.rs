@@ -1377,9 +1377,15 @@ fn prompt_appid_for_queue(
             .overlay(false)
             .w(px(420.))
             .child(prompt.clone())
-            // Enter belongs to the search field (it picks a game there); the
-            // dialog's own "confirm" would close it as a skip.
-            .on_ok(|_, _, _| false)
+            // Enter: in the search field it is the field's (it picks a game
+            // there, and the dialog's own "confirm" would close it as a
+            // skip); on Skip, Add or a Use button it presses that button.
+            .on_ok({
+                let prompt = prompt.clone();
+                move |_, window, cx| {
+                    prompt.update(cx, |prompt, cx| prompt.enter_pressed(window, cx))
+                }
+            })
             // Escape and the close button land here.
             .on_close(move |_, window, cx| advance(window, cx))
     });
@@ -1405,7 +1411,34 @@ struct AppIdPrompt {
     /// keystrokes produces one request instead of one per key. Replacing the
     /// task cancels the one before.
     pending_search: Option<Task<()>>,
+    /// The focus of Skip, Add and each game's Use button, so Enter can act
+    /// as the focused one (see `EnterKey`).
+    skip_focus: FocusHandle,
+    add_focus: FocusHandle,
+    use_focus: RefCell<HashMap<(&'static str, u32), FocusHandle>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What Enter does in the AppID dialog, by where the keyboard focus is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AppIdEnter {
+    /// In the search field: the field handles it; the dialog stays.
+    Field,
+    Skip,
+    Add,
+    Use(u32),
+    /// Anywhere else (the close button): the dialog closes, which skips.
+    Close,
+}
+
+fn appid_enter(field: bool, skip: bool, add: bool, used: Option<u32>) -> AppIdEnter {
+    match (field, skip, add, used) {
+        (true, ..) => AppIdEnter::Field,
+        (_, true, ..) => AppIdEnter::Skip,
+        (_, _, true, _) => AppIdEnter::Add,
+        (_, _, _, Some(appid)) => AppIdEnter::Use(appid),
+        _ => AppIdEnter::Close,
+    }
 }
 
 impl AppIdPrompt {
@@ -1468,6 +1501,9 @@ impl AppIdPrompt {
             picked: false,
             finish,
             pending_search: None,
+            skip_focus: cx.focus_handle(),
+            add_focus: cx.focus_handle(),
+            use_focus: RefCell::default(),
             _subscriptions: vec![subscription],
         };
 
@@ -1586,6 +1622,31 @@ impl AppIdPrompt {
         (self.finish)(window, cx);
     }
 
+    /// Enter, handed over by the dialog. True lets the dialog close itself.
+    fn enter_pressed(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let used = self
+            .use_focus
+            .borrow()
+            .iter()
+            .find(|(_, focus)| focus.is_focused(window))
+            .map(|((_, appid), _)| *appid);
+        let action = appid_enter(
+            self.input.focus_handle(cx).contains_focused(window, cx),
+            self.skip_focus.is_focused(window),
+            self.add_focus.is_focused(window),
+            used,
+        );
+        // The buttons' own paths close the dialog, as a click on them does.
+        match action {
+            AppIdEnter::Field => {}
+            AppIdEnter::Skip => (self.finish)(window, cx),
+            AppIdEnter::Add => self.add_clicked(window, cx),
+            AppIdEnter::Use(appid) => self.confirm(appid, window, cx),
+            AppIdEnter::Close => return true,
+        }
+        false
+    }
+
     fn add_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value();
         let trimmed = text.trim();
@@ -1657,6 +1718,12 @@ impl AppIdPrompt {
             )
             .child(
                 Button::new((key, appid as usize + (1 << 32)))
+                    .track_focus(
+                        self.use_focus
+                            .borrow_mut()
+                            .entry((key, appid))
+                            .or_insert_with(|| cx.focus_handle()),
+                    )
                     .small()
                     .label("Use")
                     .accessibility_label(format!("Use {name}"))
@@ -1739,6 +1806,7 @@ impl Render for AppIdPrompt {
                     .gap_2()
                     .child(
                         Button::new("appid-skip")
+                            .track_focus(&self.skip_focus)
                             .label("Skip")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 (this.finish)(window, cx);
@@ -1746,6 +1814,7 @@ impl Render for AppIdPrompt {
                     )
                     .child(
                         Button::new("appid-add")
+                            .track_focus(&self.add_focus)
                             .primary()
                             .label("Add")
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2539,6 +2608,23 @@ mod tests {
         assert!(gpu.contains("graphics driver") && gpu.ends_with("Details: x"));
         let headless = no_window_message("x", false);
         assert!(headless.contains("no display") && !headless.contains("graphics driver"));
+    }
+
+    #[test]
+    fn enter_in_the_appid_dialog_presses_the_focused_button() {
+        use super::{appid_enter, AppIdEnter};
+        assert_eq!(appid_enter(true, false, false, None), AppIdEnter::Field);
+        assert_eq!(appid_enter(false, true, false, None), AppIdEnter::Skip);
+        assert_eq!(appid_enter(false, false, true, None), AppIdEnter::Add);
+        assert_eq!(
+            appid_enter(false, false, false, Some(7)),
+            AppIdEnter::Use(7)
+        );
+        assert_eq!(
+            appid_enter(false, false, false, None),
+            AppIdEnter::Close,
+            "on the close button Enter closes, which skips"
+        );
     }
 
     #[test]

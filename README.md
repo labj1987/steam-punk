@@ -180,7 +180,8 @@ The window is drawn with [GPUI Kit](https://github.com/longbridge/gpui-kit) and 
 (Apache-2.0), with icons from [Lucide](https://lucide.dev) (ISC). The AppImage carries the
 licence notices of these and of every other Rust crate built into it, in
 `usr/share/licenses/steam-punk/THIRD-PARTY-LICENSES.txt` (`--appimage-extract` shows it;
-`scripts/third_party_licenses.py` writes it).
+`scripts/third_party_licenses.py` writes it: each crate's own licence files, or, for a crate
+that ships none, the standard text of the licences it names).
 
 Code at or before commit `0d97e95b89080c5b53efca8880abfd8834d3009a` remains available
 under the MIT License per its original release. From this commit forward,
