@@ -1427,8 +1427,9 @@ enum AppIdEnter {
     Skip,
     Add,
     Use(u32),
-    /// Anywhere else (the close button): the dialog closes, which skips.
-    Close,
+    /// Anywhere else (the dialog surface, the field's clear button, the toolkit's
+    /// close button, whose focus the dialog cannot see): the dialog stays open.
+    Nothing,
 }
 
 fn appid_enter(field: bool, skip: bool, add: bool, used: Option<u32>) -> AppIdEnter {
@@ -1437,7 +1438,7 @@ fn appid_enter(field: bool, skip: bool, add: bool, used: Option<u32>) -> AppIdEn
         (_, true, ..) => AppIdEnter::Skip,
         (_, _, true, _) => AppIdEnter::Add,
         (_, _, _, Some(appid)) => AppIdEnter::Use(appid),
-        _ => AppIdEnter::Close,
+        _ => AppIdEnter::Nothing,
     }
 }
 
@@ -1622,7 +1623,8 @@ impl AppIdPrompt {
         (self.finish)(window, cx);
     }
 
-    /// Enter, handed over by the dialog. True lets the dialog close itself.
+    /// Enter, handed over by the dialog. Always false: the dialog never closes
+    /// itself, only the buttons' own paths do.
     fn enter_pressed(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let used = self
             .use_focus
@@ -1642,7 +1644,7 @@ impl AppIdPrompt {
             AppIdEnter::Skip => (self.finish)(window, cx),
             AppIdEnter::Add => self.add_clicked(window, cx),
             AppIdEnter::Use(appid) => self.confirm(appid, window, cx),
-            AppIdEnter::Close => return true,
+            AppIdEnter::Nothing => {}
         }
         false
     }
@@ -2622,8 +2624,8 @@ mod tests {
         );
         assert_eq!(
             appid_enter(false, false, false, None),
-            AppIdEnter::Close,
-            "on the close button Enter closes, which skips"
+            AppIdEnter::Nothing,
+            "anywhere else (surface, clear or close button) Enter leaves the dialog open"
         );
     }
 

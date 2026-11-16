@@ -242,7 +242,7 @@ checkout:
 - Enter in a dialog: the toolkit sends Enter to the dialog's `on_ok` before the focused button
   sees it. Every dialog therefore sets `on_ok` and acts as the focused button (`enter_key`):
   confirm only when the action button has the focus, cancel on Cancel, and return false (stay
-  open) anywhere else. A dialog with a text field returns false always. The default button is
+  open) anywhere else. The AppID dialog (a text field plus Skip, Add and a Use button per game) acts on Skip, Add or the focused Use button, leaves Enter to the field in the search field, and returns false everywhere else (dialog surface, the field's clear button, the toolkit's close button, whose focus the dialog cannot see): it never closes itself. The default button is
   the one given the focus at opening; the anti-cheat warning's is Cancel.
 - Nothing may show a notification before the window has the toolkit's root view (that is,
   from `MainView::new`): `push_notification` panics there. `show_toast` returns false instead,
