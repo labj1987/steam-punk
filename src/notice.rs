@@ -13,13 +13,19 @@ pub fn show_error(message: &str) {
         return;
     }
     for (program, args) in commands(message) {
-        let status = std::process::Command::new(program)
+        let output = std::process::Command::new(program)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if status.is_ok_and(|status| showed(program, status.code())) {
+            .stderr(std::process::Stdio::piped())
+            .output();
+        if output.is_ok_and(|output| {
+            showed(
+                program,
+                output.status.code(),
+                &String::from_utf8_lossy(&output.stderr),
+            )
+        }) {
             break;
         }
     }
@@ -32,9 +38,9 @@ pub fn has_display() -> bool {
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
-/// The programs tried, in order, with their arguments. The notification
-/// sent over D-Bus has no expiry (0): COSMIC drops one with the default
-/// after a few seconds, before anyone has read an error.
+/// The programs tried, in order, with their arguments. The notifications
+/// have no expiry (0): COSMIC drops one with the default after a few
+/// seconds, before anyone has read an error.
 fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
     let plain = plain(message);
     let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
@@ -63,7 +69,12 @@ fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
         (
             "notify-send",
             with(
-                args(&["--urgency=critical", "--app-name=Steam Punk", "Steam Punk"]),
+                args(&[
+                    "--urgency=critical",
+                    "--expire-time=0",
+                    "--app-name=Steam Punk",
+                    "Steam Punk",
+                ]),
                 &plain,
             ),
         ),
@@ -102,12 +113,25 @@ fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
 /// pressed their button and 1 when the user closed them another way; both
 /// mean it was seen. Anything else (no display, a crash, a signal) does not.
 /// notify-send and gdbus show nothing themselves: only 0 says the desktop
-/// took the message. xmessage ends with 1 when it could not open the display.
-fn showed(program: &str, code: Option<i32>) -> bool {
+/// took the message. xmessage ends with 1 when it could not open the display,
+/// and so does zenity, which then says so on `stderr`.
+fn showed(program: &str, code: Option<i32>, stderr: &str) -> bool {
     match program {
         "notify-send" | "gdbus" | "xmessage" => code == Some(0),
+        _ if no_display(stderr) => false,
         _ => matches!(code, Some(0 | 1)),
     }
+}
+
+/// Whether a dialog program's `stderr` says it could not open the display.
+fn no_display(stderr: &str) -> bool {
+    [
+        "Failed to open display",
+        "cannot open display",
+        "Cannot open display",
+    ]
+    .iter()
+    .any(|text| stderr.contains(text))
 }
 
 /// `text` with nothing kdialog (Qt rich text) or a notification server (body
@@ -162,17 +186,46 @@ mod tests {
 
     #[test]
     fn only_a_shown_message_stops_the_chain() {
-        assert!(showed("zenity", Some(0)));
-        assert!(showed("zenity", Some(1)), "closed with the window's X");
-        assert!(showed("kdialog", Some(1)));
-        assert!(!showed("zenity", Some(255)), "could not open a display");
-        assert!(!showed("kdialog", None), "killed by a signal");
-        assert!(showed("notify-send", Some(0)));
-        assert!(!showed("notify-send", Some(1)), "no notification service");
-        assert!(showed("gdbus", Some(0)));
-        assert!(!showed("gdbus", Some(1)), "no notification service");
-        assert!(showed("xmessage", Some(0)));
-        assert!(!showed("xmessage", Some(1)), "could not open the display");
+        let shown = |program, code| showed(program, code, "");
+        assert!(shown("zenity", Some(0)));
+        assert!(shown("zenity", Some(1)), "closed with the window's X");
+        assert!(shown("kdialog", Some(1)));
+        assert!(!shown("zenity", Some(255)), "could not open a display");
+        assert!(
+            !showed(
+                "zenity",
+                Some(1),
+                "(zenity:42): Gtk-WARNING **: cannot open display: :0\n"
+            ),
+            "zenity with no display exits 1 too"
+        );
+        assert!(!showed("zenity", Some(1), "Failed to open display\n"));
+        assert!(!showed(
+            "kdialog",
+            Some(1),
+            "qt.qpa.xcb: could not connect to display\nCannot open display\n"
+        ));
+        assert!(!shown("kdialog", None), "killed by a signal");
+        assert!(shown("notify-send", Some(0)));
+        assert!(!shown("notify-send", Some(1)), "no notification service");
+        assert!(shown("gdbus", Some(0)));
+        assert!(!shown("gdbus", Some(1)), "no notification service");
+        assert!(shown("xmessage", Some(0)));
+        assert!(!shown("xmessage", Some(1)), "could not open the display");
+    }
+
+    #[test]
+    fn notifications_stay_until_closed() {
+        let commands = commands("x");
+        let notify_send = &commands
+            .iter()
+            .find(|(p, _)| *p == "notify-send")
+            .unwrap()
+            .1;
+        assert!(
+            notify_send.contains(&"--expire-time=0".to_string()),
+            "{notify_send:?}"
+        );
     }
 
     #[test]

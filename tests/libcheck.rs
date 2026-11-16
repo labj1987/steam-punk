@@ -594,6 +594,19 @@ fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
         calls.ends_with("== xmessage\n-center\n-title\nSteam Punk\nBroken.\n"),
         "{calls}"
     );
+    // zenity that can't open the display ends with 1 as well, and says so: not shown.
+    std::fs::remove_file(&log).unwrap();
+    script_file(
+        &dir.join("zenity"),
+        &format!(
+            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :0' >&2\nexit 1\n",
+            log.display()
+        ),
+    );
+    assert_eq!(
+        called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
+        ["zenity", "kdialog"]
+    );
     // A dialog closed with its X (exit 1) was seen: nothing else is shown.
     std::fs::remove_file(&log).unwrap();
     fake(&dir, "zenity", &log, 1);
@@ -605,9 +618,11 @@ fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
     std::fs::remove_file(&log).unwrap();
     std::fs::remove_file(dir.join("zenity")).unwrap();
     fake(&dir, "notify-send", &log, 0);
-    assert_eq!(
-        called(&show_with(&dir, &log, "Steam Punk", "x")),
-        ["kdialog", "notify-send"]
+    let calls = show_with(&dir, &log, "Steam Punk", "x");
+    assert_eq!(called(&calls), ["kdialog", "notify-send"]);
+    assert!(
+        calls.contains("== notify-send\n-u\ncritical\n-t\n0\n"),
+        "stays until closed: {calls}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
