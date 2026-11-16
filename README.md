@@ -127,8 +127,9 @@ Input methods (IBus and Fcitx 5) work in the search field.
   set to.
 - **Starting Steam Punk a second time** shows the window that is already open. On Wayland
   it comes to the front when the second start came from your launcher, dock or menu, which
-  hands over the permission to do so (a compositor may still refuse: Hyprland does unless
-  `misc:focus_on_activate` is on); started from a terminal, the desktop only marks the
+  hands over the permission to do so (a compositor may still refuse: GNOME shows a
+  "Steam Punk is ready" notice instead, as it does for other apps, and Hyprland refuses
+  unless `misc:focus_on_activate` is on); started from a terminal, the desktop only marks the
   window as wanting attention. On X11 the busy cursor of the second start goes away on its
   own after a few seconds.
 - **KDE Plasma:** while the file dialog is open, the Steam Punk window can be hidden
