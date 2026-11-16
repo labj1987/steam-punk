@@ -1,6 +1,6 @@
 [package]
 name = "steam-punk"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2021"
 rust-version = "1.100"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
@@ -16,6 +16,10 @@ path = "src/main.rs"
 gpui-kit = "=0.9.1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 anyhow = "1"
+futures-util = "0.3"
+# The desktop's accent colour (accent.rs), from the XDG desktop portal: the portal client the toolkit
+# already uses for its file dialogs and light/dark setting, with the same features.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "settings"] }
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

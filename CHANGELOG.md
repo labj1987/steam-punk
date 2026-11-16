@@ -4,6 +4,15 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.9.3 — 2026-11-16
+
+- **The window takes your desktop's accent colour.** On GNOME, KDE Plasma and COSMIC, primary
+  buttons, switches, checkboxes and radio buttons, focus rings, links, text selection and progress
+  bars now use the accent colour you picked, in light and dark mode alike, and change with it at
+  once. Text on accent-coloured buttons stays readable: it is white or near-black, whichever stands
+  out. On desktops without an accent colour (Hyprland, sway, GNOME before 47) the colours stay as
+  they were.
+
 ## 0.9.2 — 2026-11-16
 
 - **Starting Steam Punk again just as it closes opens a new window at once.** A start made at
