@@ -340,7 +340,7 @@ where
     let proton = target.proton_dir.join("proton");
     match &target.sandbox {
         None => {
-            let mut cmd = crate::host_env::command(&proton);
+            let mut cmd = std::process::Command::new(&proton);
             cmd.args(args)
                 .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", &target.client_dir)
                 .env("STEAM_COMPAT_DATA_PATH", &target.compatdata_dir);
@@ -354,7 +354,7 @@ where
                 .client_install_path
                 .clone()
                 .unwrap_or_else(|| target.client_dir.to_string_lossy().into_owned());
-            let mut cmd = crate::host_env::command("flatpak");
+            let mut cmd = std::process::Command::new("flatpak");
             cmd.arg("enter").arg(sandbox.pid.to_string()).arg("env");
             for var in unset {
                 cmd.arg("-u").arg(var);
