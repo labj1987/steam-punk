@@ -483,6 +483,8 @@ fn show_confirm_dialog(question: Question, on_ok: Continuation, window: &mut Win
 /// in. Says so through whatever the desktop offers, then exits: a process
 /// left behind with no window would also keep later launches from starting.
 fn no_window(error: &str) -> ! {
+    // Later launches must not wait for this copy while the message is up.
+    crate::instance::release();
     let message = no_window_message(error, crate::notice::has_display());
     eprintln!("steam-punk: {message}");
     applog::log(&format!("UI: {message}"));
@@ -634,6 +636,8 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
 
     cx.on_window_closed(|cx, _| {
         if cx.windows().is_empty() {
+            // A launch from now on starts a new copy instead of asking this one.
+            crate::instance::release();
             cx.quit();
         }
     })
@@ -644,10 +648,13 @@ pub fn build_ui(cx: &mut App, mut activations: Activations) {
     // that raises the window (see activation.rs). Without a token, or off
     // Wayland, GPUI's own request is what there is; a Wayland compositor then
     // marks the window as wanting attention instead of raising it.
+    // From the first drawn frame on, later launches get "ok" without being
+    // told this copy is still starting.
+    let up = activations.up_signal();
+    let _ = window.update(cx, |_, window, _| {
+        window.on_next_frame(move |_, _| up.set())
+    });
     cx.spawn(async move |cx| {
-        // From here on requests are handled: later launches get "ok" without
-        // being told this copy is still starting.
-        activations.ui_up();
         while let Some(request) = activations.recv().await {
             let shown = window.update(cx, |_, window, _| {
                 let raised = request

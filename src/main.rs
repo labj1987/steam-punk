@@ -95,8 +95,16 @@ fn main() {
     let activations = match instance::claim() {
         instance::Claim::Primary(activations) => activations,
         instance::Claim::HandedOver => return,
-        instance::Claim::NotResponding(unanswered) => {
-            let message = instance::not_responding_message(unanswered);
+        // Still starting: it has the request and shows its window when it
+        // is up, so this is news, not an error.
+        instance::Claim::Starting(pid) => {
+            let message = instance::starting_message(pid);
+            eprintln!("steam-punk: {message}");
+            notice::show_info(&message);
+            return;
+        }
+        instance::Claim::NotResponding(pid) => {
+            let message = instance::not_responding_message(pid);
             eprintln!("steam-punk: {message}");
             notice::show_error(&message);
             std::process::exit(1);

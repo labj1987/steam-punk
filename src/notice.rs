@@ -7,28 +7,75 @@
 //! AppRun's `libcheck_show` (build-appimage.sh) tries the same programs in
 //! the same order; a test holds the two together.
 
+/// What a message is: an error the user has to act on, or information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// An error dialog, or a critical notification that stays until closed.
+    Error,
+    /// An information dialog, or a normal notification with the desktop's
+    /// default expiry.
+    Info,
+}
+
 /// Shows `message` as an error, when there is a display to show it on.
 pub fn show_error(message: &str) {
+    show(Kind::Error, message);
+}
+
+/// Shows `message` as information, when there is a display to show it on.
+pub fn show_info(message: &str) {
+    show(Kind::Info, message);
+}
+
+fn show(kind: Kind, message: &str) {
     if !has_display() {
         return;
     }
-    for (program, args) in commands(message) {
-        let output = std::process::Command::new(program)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output();
-        if output.is_ok_and(|output| {
-            showed(
-                program,
-                output.status.code(),
-                &String::from_utf8_lossy(&output.stderr),
-            )
-        }) {
+    for (program, args) in commands(kind, message) {
+        if run(program, &args).is_some_and(|(code, stderr)| showed(program, code, &stderr)) {
             break;
         }
     }
+}
+
+/// Runs `program` with `args`, waits for it, and returns its exit code and
+/// what it wrote on stderr. Its stderr goes to a private temporary file,
+/// read once the program has ended: reading a pipe to its end would also
+/// wait for any process the program started that kept the pipe open.
+fn run(program: &str, args: &[String]) -> Option<(Option<i32>, String)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SERIAL: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "steam-punk-notice-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok();
+    let stderr = file
+        .as_ref()
+        .and_then(|file| file.try_clone().ok())
+        .map_or_else(std::process::Stdio::null, std::process::Stdio::from);
+    let status = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(stderr)
+        .status();
+    let text = match file {
+        Some(_) => {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let _ = std::fs::remove_file(&path);
+            text
+        }
+        None => String::new(),
+    };
+    status.ok().map(|status| (status.code(), text))
 }
 
 /// Whether there is a display server to show anything on.
@@ -38,10 +85,12 @@ pub fn has_display() -> bool {
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
-/// The programs tried, in order, with their arguments. The notifications
-/// have no expiry (0): COSMIC drops one with the default after a few
-/// seconds, before anyone has read an error.
-fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
+/// The programs tried, in order, with their arguments. An error's
+/// notifications have no expiry (0): COSMIC drops one with the default after
+/// a few seconds, before anyone has read it. Information gets the normal
+/// urgency and the desktop's default expiry (-1).
+fn commands(kind: Kind, message: &str) -> Vec<(&'static str, Vec<String>)> {
+    let error = kind == Kind::Error;
     let plain = plain(message);
     let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     let with = |mut list: Vec<String>, last: &str| {
@@ -53,7 +102,7 @@ fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
             "zenity",
             with(
                 args(&[
-                    "--error",
+                    if error { "--error" } else { "--info" },
                     "--no-markup",
                     "--title=Steam Punk",
                     "--width=480",
@@ -64,17 +113,28 @@ fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
         ),
         (
             "kdialog",
-            with(args(&["--title", "Steam Punk", "--error"]), &plain),
+            with(
+                args(&[
+                    "--title",
+                    "Steam Punk",
+                    if error { "--error" } else { "--msgbox" },
+                ]),
+                &plain,
+            ),
         ),
         (
             "notify-send",
             with(
-                args(&[
-                    "--urgency=critical",
-                    "--expire-time=0",
-                    "--app-name=Steam Punk",
-                    "Steam Punk",
-                ]),
+                if error {
+                    args(&[
+                        "--urgency=critical",
+                        "--expire-time=0",
+                        "--app-name=Steam Punk",
+                        "Steam Punk",
+                    ])
+                } else {
+                    args(&["--urgency=normal", "--app-name=Steam Punk", "Steam Punk"])
+                },
                 &plain,
             ),
         ),
@@ -98,7 +158,11 @@ fn commands(message: &str) -> Vec<(&'static str, Vec<String>)> {
                 &gvariant_string(&plain),
             )
             .into_iter()
-            .chain(args(&["@as []", "{'urgency': <byte 2>}", "int32 0"]))
+            .chain(if error {
+                args(&["@as []", "{'urgency': <byte 2>}", "int32 0"])
+            } else {
+                args(&["@as []", "{'urgency': <byte 1>}", "int32 -1"])
+            })
             .collect(),
         ),
         (
@@ -165,7 +229,7 @@ mod tests {
 
     #[test]
     fn every_way_to_show_a_message_is_tried_in_the_apprun_order() {
-        let names: Vec<_> = commands("x")
+        let names: Vec<_> = commands(Kind::Error, "x")
             .into_iter()
             .map(|(program, _)| program)
             .collect();
@@ -215,8 +279,62 @@ mod tests {
     }
 
     #[test]
+    fn information_uses_the_info_dialogs_and_a_normal_notification() {
+        let commands = commands(Kind::Info, "x");
+        let names: Vec<_> = commands.iter().map(|(program, _)| *program).collect();
+        assert_eq!(
+            names,
+            ["zenity", "kdialog", "notify-send", "gdbus", "xmessage"]
+        );
+        let args = |program: &str| {
+            commands
+                .iter()
+                .find(|(name, _)| *name == program)
+                .map(|(_, args)| args.clone())
+                .unwrap()
+        };
+        assert_eq!(args("zenity")[0], "--info");
+        assert!(args("kdialog").contains(&"--msgbox".to_string()));
+        let notify_send = args("notify-send");
+        assert!(notify_send.contains(&"--urgency=normal".to_string()));
+        assert!(
+            !notify_send
+                .iter()
+                .any(|arg| arg.starts_with("--expire-time")),
+            "the desktop's default expiry: {notify_send:?}"
+        );
+        let gdbus = args("gdbus");
+        assert_eq!(
+            &gdbus[gdbus.len() - 2..],
+            ["{'urgency': <byte 1>}", "int32 -1"]
+        );
+    }
+
+    #[test]
+    fn a_dialogs_stderr_is_read_after_it_ends_even_if_a_child_keeps_it_open() {
+        // A "dialog" that leaves a background process holding its stderr: a
+        // pipe read to its end would wait the 5 s that process sleeps.
+        let started = std::time::Instant::now();
+        let (code, stderr) = run(
+            "sh",
+            &[
+                "-c".to_string(),
+                "echo 'cannot open display: :9999' >&2; sleep 5 & exit 1".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(code, Some(1));
+        assert!(!showed("zenity", code, &stderr), "{stderr}");
+    }
+
+    #[test]
     fn notifications_stay_until_closed() {
-        let commands = commands("x");
+        let commands = commands(Kind::Error, "x");
         let notify_send = &commands
             .iter()
             .find(|(p, _)| *p == "notify-send")
@@ -230,7 +348,7 @@ mod tests {
 
     #[test]
     fn gdbus_gets_the_message_as_one_quoted_string_with_no_expiry() {
-        let (_, args) = commands("it's \"odd\" <b> & a\\b\nline 2")
+        let (_, args) = commands(Kind::Error, "it's \"odd\" <b> & a\\b\nline 2")
             .into_iter()
             .find(|(program, _)| *program == "gdbus")
             .unwrap();
@@ -247,7 +365,7 @@ mod tests {
 
     #[test]
     fn the_dialogs_get_the_message_as_it_is_and_the_others_without_markup() {
-        let commands = commands("a <b> & c");
+        let commands = commands(Kind::Error, "a <b> & c");
         let last = |program: &str| {
             commands
                 .iter()

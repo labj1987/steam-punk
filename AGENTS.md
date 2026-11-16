@@ -61,18 +61,28 @@ error, and saving an AppID fails instead of wiping the file.
 - `instance.rs` — one running copy per user login: a socket in `XDG_RUNTIME_DIR` (bound under a
   `flock`ed lock file; a socket file is removed only when nobody listens on it); a second
   launch sends `activate <token>\n` and waits for the answer. The listener thread answers
-  `starting\n` at once until the UI loop has called `Activations::ui_up`; the UI loop answers
-  `ok\n` (`Activation::done`) after it has raised the window. The second launch waits 2 s for
-  any answer and 15 s in all for `ok`; no answer -> `Claim::NotResponding` (main.rs shows
-  `not_responding_message`, "not responding ... (PID n)" or "still starting (process n)", the
-  PID from `SO_PEERCRED`, on stderr and through notice.rs, and exits 1). A connection closed
-  with no answer (EOF or reset: the copy was exiting) retries the claim once, then the launch
-  exits quietly. Without `XDG_RUNTIME_DIR` there is no single-instance check.
-- `notice.rs` — a message with no window of the app's own (no graphics driver, a running copy
-  that does not answer): zenity, kdialog, notify-send, `gdbus` straight to
-  `org.freedesktop.Notifications.Notify` (expiry 0: COSMIC drops others after seconds, and has
-  no notify-send), xmessage; the first that shows it ends the chain. AppRun's `libcheck_show`
-  tries the same programs in the same order (a test compares the two); keep them in step.
+  `starting\n` at once until the window's first drawn frame sets `UiUp` (`on_next_frame` in
+  `ui::build_ui`); the UI loop answers `ok\n` (`Activation::done`) after it has raised the
+  window. The second launch waits 2 s for any answer and 15 s in all for `ok`. Still
+  "starting" after that -> `Claim::Starting` (main.rs shows `starting_message` as information
+  and exits 0: the request is queued and the window comes up on its own); no answer ->
+  `Claim::NotResponding` ("not responding ... (PID n)", the PID from `SO_PEERCRED`, as an
+  error, exit 1). A connection closed with no answer (EOF or reset: the copy is exiting) is
+  asked again every 75 ms until nobody listens (this launch becomes the primary) or the 2 s
+  answer wait runs out (exit quietly). `instance::release` shuts the listener and removes the
+  socket file; it runs when the last window closes and before `ui::no_window` shows its
+  message, so no launch waits on a copy that is going away. Without `XDG_RUNTIME_DIR` there is
+  no single-instance check.
+- `notice.rs` — a message with no window of the app's own, as an error (no graphics driver, a
+  running copy that does not answer) or as information (a running copy still starting):
+  zenity (`--error`/`--info`), kdialog (`--error`/`--msgbox`), notify-send, `gdbus` straight to
+  `org.freedesktop.Notifications.Notify`, xmessage; the first that shows it ends the chain. An
+  error's notifications are critical with expiry 0 (COSMIC drops others after seconds, and has
+  no notify-send); information is normal urgency with the default expiry. A dialog's stderr
+  goes to a temporary file read after it exits (a pipe would wait for anything it left
+  running); exit 1 with "cannot open display" there is not shown. AppRun's `libcheck_show`
+  (`libcheck_dialog`) tries the same programs in the same order for errors (a test compares
+  the two); keep them in step.
 - `activation.rs` — raises the window for that second launch on Wayland: GPUI has no call that
   takes an activation token, so `xdg_activation_v1.activate(token, surface)` is sent on GPUI's
   own connection through the window's raw handles (wayland-client as a guest on the foreign
@@ -96,8 +106,8 @@ error, and saving an AppID fails instead of wiping the file.
   user-owned wine prefix and needs no privilege escalation. pkexec always runs through
   `run_pkexec`: `setsid` (no controlling terminal) and stdin from /dev/null, so on a desktop
   started from a text console with no polkit agent it fails at once instead of prompting on
-  that console. No pkexec on PATH -> `no_pkexec_message` (install command per distribution
-  from os-release); 126, and 127 with "Not authorized" (polkit-kde-agent's Cancel) ->
+  that console. No pkexec on PATH -> `NO_PKEXEC_MESSAGE` (apt's install command: the
+  automatic setup is only offered where apt-get is); 126, and 127 with "Not authorized" (polkit-kde-agent's Cancel) ->
   "cancelled or refused"; 127 with a no-agent text -> `NO_AGENT_MESSAGE`.
 - `applog.rs` — single per-session log covering launches, setup steps, and
   user actions, at `~/.local/share/steam-punk/steam-punk.log` (unit tests

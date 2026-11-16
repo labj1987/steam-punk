@@ -549,13 +549,20 @@ fn fake(bin: &Path, name: &str, log: &Path, code: i32) {
 }
 
 /// Runs `libcheck_show` with only the programs in `bin` (and bash's own
-/// builtins) available, on a display. Returns what the fakes logged.
+/// builtins, mktemp and rm) available, on a display. Returns what the fakes logged.
 fn show_with(bin: &Path, log: &Path, title: &str, text: &str) -> String {
+    // libcheck_dialog's temporary file for a dialog's stderr.
+    for tool in ["mktemp", "rm"] {
+        let link = bin.join(tool);
+        if !link.exists() {
+            std::os::unix::fs::symlink(format!("/usr/bin/{tool}"), link).unwrap();
+        }
+    }
     let script = format!("{}\nlibcheck_show \"$1\" \"$2\"\n", block());
     let out = Command::new("/bin/bash")
         .args(["-c", &script, "bash", title, text])
         .env("PATH", bin)
-        .env("DISPLAY", ":0")
+        .env("DISPLAY", ":9999")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("LIBCHECK_DIALOG")
         .output()
@@ -606,6 +613,25 @@ fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
     assert_eq!(
         called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
         ["zenity", "kdialog"]
+    );
+    // A dialog that leaves a process holding its stderr is not waited for.
+    std::fs::remove_file(&log).unwrap();
+    script_file(
+        &dir.join("zenity"),
+        &format!(
+            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :9999' >&2\nsleep 5 &\nexit 1\n",
+            log.display()
+        ),
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
+        ["zenity", "kdialog"]
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
     );
     // A dialog closed with its X (exit 1) was seen: nothing else is shown.
     std::fs::remove_file(&log).unwrap();

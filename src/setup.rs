@@ -83,8 +83,7 @@ fn installed_matches(path: &str, bytes: &[u8]) -> bool {
 pub fn run_system_setup() -> Result<()> {
     if !on_path("pkexec") {
         crate::applog::log("run_system_setup: pkexec is not installed");
-        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-        bail!("{}", no_pkexec_message(&os_release));
+        bail!("{}", NO_PKEXEC_MESSAGE);
     }
     let current =
         installed_matches(SCRIPT, SCRIPT_BYTES) && installed_matches(POLICY, POLICY_BYTES);
@@ -140,42 +139,9 @@ fn failure_message(code: i32, stderr: &str) -> String {
 
 const CANCELLED: &str = "Authorization was cancelled or refused, so nothing was changed.";
 
-/// The system's package manager (apt, dnf, zypper or pacman), from the text
-/// of os-release (its ID, then the IDs in ID_LIKE); `None` for one it does
-/// not know.
-fn package_manager(os_release: &str) -> Option<&'static str> {
-    let field = |name: &str| {
-        os_release
-            .lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
-            .map(|value| value.trim().trim_matches(['"', '\'']).to_string())
-            .unwrap_or_default()
-    };
-    let ids = format!("{} {}", field("ID"), field("ID_LIKE"));
-    ids.split_whitespace().find_map(|id| match id {
-        "fedora" | "rhel" | "centos" | "rocky" | "almalinux" => Some("dnf"),
-        id if id == "suse" || id == "sles" || id.starts_with("opensuse") => Some("zypper"),
-        "debian" | "ubuntu" => Some("apt"),
-        "arch" => Some("pacman"),
-        _ => None,
-    })
-}
-
-/// What a system without pkexec is told, with the command that installs it
-/// on this distribution (from the text of os-release).
-fn no_pkexec_message(os_release: &str) -> String {
-    let how = match package_manager(os_release) {
-        Some("apt") => Some("sudo apt install pkexec"),
-        Some("dnf") => Some("sudo dnf install polkit"),
-        Some("zypper") => Some("sudo zypper install polkit"),
-        Some("pacman") => Some("sudo pacman -S polkit"),
-        _ => None,
-    };
-    match how {
-        Some(how) => format!("polkit's pkexec is not installed, so nothing was changed. Install it with: {how} (and a polkit authentication agent, if your desktop has none), then try again."),
-        None => "polkit's pkexec is not installed, so nothing was changed. Install polkit (and a polkit authentication agent, if your desktop has none) with your package manager, then try again.".to_string(),
-    }
-}
+/// What a system without pkexec is told. The automatic setup is only offered
+/// where apt-get is (`apt_available`), so the install command is apt's.
+const NO_PKEXEC_MESSAGE: &str = "polkit's pkexec is not installed, so nothing was changed. Install it with: sudo apt install pkexec (and a polkit authentication agent, if your desktop has none), then try again.";
 
 /// pkexec's own complaint when no polkit authentication agent (the program
 /// that shows the admin password dialog) is running, as on a bare Hyprland,
@@ -494,39 +460,10 @@ mod tests {
 
     #[test]
     fn a_missing_pkexec_is_named_with_the_install_command() {
-        for (os, want) in [
-            ("ID=fedora\n", "Install it with: sudo dnf install polkit "),
-            (
-                "ID=ubuntu\nID_LIKE=debian\n",
-                "Install it with: sudo apt install pkexec ",
-            ),
-            (
-                "NAME=\"Pop!_OS\"\nID=pop\nID_LIKE=\"ubuntu debian\"\n",
-                "Install it with: sudo apt install pkexec ",
-            ),
-            (
-                "ID=cachyos\nID_LIKE=arch\n",
-                "Install it with: sudo pacman -S polkit ",
-            ),
-            (
-                "ID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\n",
-                "Install it with: sudo zypper install polkit ",
-            ),
-            (
-                "ID=somethingelse\n",
-                "Install polkit (and a polkit authentication agent, if your desktop has none) with your package manager",
-            ),
-            ("", "with your package manager"),
-        ] {
-            let text = no_pkexec_message(os);
-            assert!(
-                text.starts_with("polkit's pkexec is not installed, so nothing was changed. ")
-                    && text.contains(want),
-                "{os:?}: {text}"
-            );
-            assert!(!text.contains("uthorization"), "{text}");
-        }
-        assert_eq!(package_manager("VERSION_ID=1\nID=arch\n"), Some("pacman"));
+        assert!(NO_PKEXEC_MESSAGE
+            .starts_with("polkit's pkexec is not installed, so nothing was changed. "));
+        assert!(NO_PKEXEC_MESSAGE.contains("sudo apt install pkexec"));
+        assert!(!NO_PKEXEC_MESSAGE.contains("uthorization"));
     }
 
     #[test]

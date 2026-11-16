@@ -47,18 +47,33 @@ impl Activation {
 /// Requests from later launches to show the running window.
 pub struct Activations {
     requests: UnboundedReceiver<Activation>,
-    ui_up: Arc<AtomicBool>,
+    ui_up: UiUp,
+    listening: Option<Listening>,
 }
 
 impl Activations {
-    fn new(requests: UnboundedReceiver<Activation>, ui_up: Arc<AtomicBool>) -> Self {
-        Activations { requests, ui_up }
+    fn new(
+        requests: UnboundedReceiver<Activation>,
+        ui_up: UiUp,
+        listening: Option<Listening>,
+    ) -> Self {
+        Activations {
+            requests,
+            ui_up,
+            listening,
+        }
     }
 
     /// Says the UI is up and handles requests: until then, a later launch is
     /// told this copy is still starting, and waits longer for its answer.
-    pub fn ui_up(&self) {
-        self.ui_up.store(true, Ordering::Release);
+    #[cfg(test)]
+    fn ui_up(&self) {
+        self.ui_up.set();
+    }
+
+    /// The handle that says the UI is up, for the window's first frame.
+    pub fn up_signal(&self) -> UiUp {
+        self.ui_up.clone()
     }
 
     /// The next request.
@@ -70,6 +85,65 @@ impl Activations {
     fn blocking_recv(&mut self) -> Option<Activation> {
         self.requests.blocking_recv()
     }
+
+    #[cfg(test)]
+    fn close(&self) {
+        if let Some(listening) = &self.listening {
+            listening.close();
+        }
+    }
+}
+
+/// Says the primary copy's UI is up (see `Activations::up_signal`). Set from
+/// the window's first drawn frame: a window that has been created but never
+/// drawn is not up yet, and a later launch is told to wait for it.
+#[derive(Clone, Default)]
+pub struct UiUp(Arc<AtomicBool>);
+
+impl UiUp {
+    pub fn set(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_set(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// The primary copy's socket, closed (and its file removed) when the app is
+/// done with it: when its last window closes, or when it can't open one.
+/// Without that, a later launch would connect to a copy that no longer reads
+/// its requests, wait out the whole start wait, and call it stuck.
+#[derive(Clone)]
+struct Listening {
+    listener: Arc<UnixListener>,
+    path: PathBuf,
+    closed: Arc<AtomicBool>,
+}
+
+impl Listening {
+    fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.path);
+        // Wakes the listening thread's accept with an error, and refuses
+        // connections from here on; the thread then ends.
+        // SAFETY: shutdown on a socket this struct keeps open.
+        unsafe { libc::shutdown(self.listener.as_raw_fd(), libc::SHUT_RDWR) };
+    }
+}
+
+/// The primary copy's socket, for `release`.
+static PRIMARY: std::sync::OnceLock<Listening> = std::sync::OnceLock::new();
+
+/// Stops answering later launches and removes the socket: call it when the
+/// app is about to end (its last window closed, or none could be opened), so
+/// the next launch becomes the primary copy at once.
+pub fn release() {
+    if let Some(listening) = PRIMARY.get() {
+        listening.close();
+    }
 }
 
 /// What `claim` found.
@@ -78,16 +152,11 @@ pub enum Claim {
     Primary(Activations),
     /// Another copy runs and has shown its window (or went away while asked).
     HandedOver,
-    /// Another copy runs but did not answer in time.
-    NotResponding(Unanswered),
-}
-
-/// A running copy that did not answer: its PID when known, and whether it
-/// had said it is still starting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Unanswered {
-    pub pid: Option<u32>,
-    pub starting: bool,
+    /// Another copy runs and is still starting: it has the request and will
+    /// show its window when it is up. Its PID when known.
+    Starting(Option<u32>),
+    /// Another copy runs but did not answer in time; its PID when known.
+    NotResponding(Option<u32>),
 }
 
 /// The running copy's answer once it has handled a request.
@@ -99,7 +168,8 @@ const STARTING: &[u8] = b"starting\n";
 /// How long a second launch waits for an answer.
 #[derive(Clone, Copy)]
 struct Waits {
-    /// For any answer at all.
+    /// For any answer at all; also how long a copy that closes the
+    /// connection unanswered (it is exiting) is retried.
     answer: Duration,
     /// For "ok" from a copy that said it is starting, counted from the request.
     start: Duration,
@@ -110,30 +180,30 @@ const WAITS: Waits = Waits {
     start: Duration::from_secs(15),
 };
 
-/// What a second launch says when the running copy did not answer.
-pub fn not_responding_message(unanswered: Unanswered) -> String {
-    match unanswered {
-        Unanswered {
-            pid: Some(pid),
-            starting: true,
-        } => format!(
-            "Steam Punk is already running but still starting (process {pid}); wait a moment and start it again, or close it and start again."
-        ),
-        Unanswered {
-            pid: None,
-            starting: true,
-        } => "Steam Punk is already running but still starting; wait a moment and start it again, or close it and start again.".to_string(),
-        Unanswered {
-            pid: Some(pid),
-            starting: false,
-        } => format!(
+/// How often a copy that closed the connection unanswered is asked again.
+const RETRY_STEP: Duration = Duration::from_millis(75);
+
+/// What a second launch says when the running copy did not answer (an error).
+pub fn not_responding_message(pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!(
             "Steam Punk is already running but not responding; close it (PID {pid}) and start again."
         ),
-        Unanswered {
-            pid: None,
-            starting: false,
-        } => "Steam Punk is already running but not responding; close it and start again."
+        None => "Steam Punk is already running but not responding; close it and start again."
             .to_string(),
+    }
+}
+
+/// What a second launch says when the running copy is still starting (not an
+/// error: its window comes up on its own, and the request is queued).
+pub fn starting_message(pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!(
+            "Steam Punk is still starting (process {pid}); its window will appear when it is ready."
+        ),
+        None => {
+            "Steam Punk is still starting; its window will appear when it is ready.".to_string()
+        }
     }
 }
 
@@ -169,7 +239,17 @@ fn valid_token(token: &str) -> bool {
 /// show its window).
 pub fn claim() -> Claim {
     match runtime_dir() {
-        Some(dir) => claim_at(&dir.join("steam-punk.sock"), launch_token(), WAITS),
+        Some(dir) => {
+            let claim = claim_at(&dir.join("steam-punk.sock"), launch_token(), WAITS);
+            if let Claim::Primary(Activations {
+                listening: Some(listening),
+                ..
+            }) = &claim
+            {
+                let _ = PRIMARY.set(listening.clone());
+            }
+            claim
+        }
         None => {
             eprintln!(
                 "steam-punk: XDG_RUNTIME_DIR is not set, so a second launch can't find this one"
@@ -177,7 +257,7 @@ pub fn claim() -> Claim {
             let (tx, rx) = unbounded_channel();
             // Kept open for the life of the process: the receiver never ends.
             std::mem::forget(tx);
-            Claim::Primary(Activations::new(rx, Arc::default()))
+            Claim::Primary(Activations::new(rx, UiUp::default(), None))
         }
     }
 }
@@ -262,7 +342,8 @@ fn hand_over(stream: UnixStream, token: Option<&str>, waits: Waits) -> Result<Cl
         {
             Err(Closed)
         }
-        _ => Ok(Claim::NotResponding(Unanswered { pid, starting })),
+        _ if starting => Ok(Claim::Starting(pid)),
+        _ => Ok(Claim::NotResponding(pid)),
     }
 }
 
@@ -277,15 +358,21 @@ fn nobody_listening(error: &std::io::Error) -> bool {
 }
 
 fn claim_at(path: &Path, token: Option<String>, waits: Waits) -> Claim {
-    // A copy that exits while it is being asked closes the connection: try
-    // again once (this launch then usually becomes the primary), and if that
-    // copy too goes away unanswered, leave quietly rather than call it hung.
-    for _ in 0..2 {
+    // A copy that exits while it is being asked closes the connection
+    // unanswered. Its listener may take a moment more to go away, so ask
+    // again in short steps until nobody listens (this launch becomes the
+    // primary) or a copy answers; if copies keep going away unanswered for
+    // the whole answer wait, leave quietly rather than call one hung.
+    let deadline = Instant::now() + waits.answer;
+    loop {
         if let Ok(claim) = try_claim(path, token.as_deref(), waits) {
             return claim;
         }
+        if Instant::now() >= deadline {
+            return Claim::HandedOver;
+        }
+        std::thread::sleep(RETRY_STEP);
     }
-    Claim::HandedOver
 }
 
 fn try_claim(path: &Path, token: Option<&str>, waits: Waits) -> Result<Claim, Closed> {
@@ -306,14 +393,28 @@ fn try_claim(path: &Path, token: Option<&str>, waits: Waits) -> Result<Claim, Cl
         }
     }
     let (tx, rx) = unbounded_channel();
-    let ui_up = Arc::new(AtomicBool::new(false));
-    let activations = Activations::new(rx, ui_up.clone());
-    match UnixListener::bind(path) {
+    let ui_up = UiUp::default();
+    let activations = match UnixListener::bind(path) {
         Ok(listener) => {
+            let listening = Listening {
+                listener: Arc::new(listener),
+                path: path.to_path_buf(),
+                closed: Arc::default(),
+            };
+            let activations = Activations::new(rx, ui_up.clone(), Some(listening.clone()));
             std::thread::spawn(move || {
-                for mut connection in listener.incoming().flatten() {
+                for connection in listening.listener.incoming() {
+                    let mut connection = match connection {
+                        Ok(connection) => connection,
+                        // Closed by `release`: no more requests.
+                        Err(_) if listening.closed.load(Ordering::Acquire) => break,
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                    };
                     let token = read_request(&connection);
-                    if !ui_up.load(Ordering::Acquire) {
+                    if !ui_up.is_set() {
                         let _ = connection.write_all(STARTING);
                     }
                     let request = Activation {
@@ -325,14 +426,16 @@ fn try_claim(path: &Path, token: Option<&str>, waits: Waits) -> Result<Claim, Cl
                     }
                 }
             });
+            activations
         }
         Err(e) => {
             // Without the socket the app still runs; it just can't be found
             // by a second launch.
             eprintln!("steam-punk: single-instance socket {}: {e}", path.display());
             std::mem::forget(tx);
+            Activations::new(rx, ui_up, None)
         }
-    }
+    };
     Ok(Claim::Primary(activations))
 }
 
@@ -353,8 +456,8 @@ fn parse_request(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_at, nobody_listening, not_responding_message, parse_request, valid_token,
-        Activations, Claim, Unanswered, Waits, MAX_TOKEN,
+        claim_at, nobody_listening, not_responding_message, parse_request, starting_message,
+        valid_token, Activations, Claim, Waits, MAX_TOKEN,
     };
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -438,12 +541,9 @@ mod tests {
         let claim = claim_at(&path, Some("tok".into()), waits(300, 5000));
         let waited = started.elapsed();
         match claim {
-            Claim::NotResponding(unanswered) => assert_eq!(
-                unanswered,
-                Unanswered {
-                    pid: Some(std::process::id()),
-                    starting: false
-                },
+            Claim::NotResponding(pid) => assert_eq!(
+                pid,
+                Some(std::process::id()),
                 "the listener's PID (this process)"
             ),
             _ => panic!("a silent copy must be reported, not taken as handed over"),
@@ -501,10 +601,7 @@ mod tests {
         let request = first.blocking_recv().unwrap();
         assert!(matches!(
             launch.join().unwrap(),
-            Claim::NotResponding(Unanswered {
-                pid: Some(_),
-                starting: false
-            })
+            Claim::NotResponding(Some(_))
         ));
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -516,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_that_stays_starting_is_reported_after_the_long_wait() {
+    fn a_copy_that_stays_starting_is_reported_as_starting_after_the_long_wait() {
         let dir = scratch("stuck-start");
         let path = dir.join("test.sock");
         let Claim::Primary(mut first) = claim_at(&path, None, WAIT) else {
@@ -531,14 +628,8 @@ mod tests {
         // Never answered: the UI never comes up.
         let claim = launch.join().unwrap();
         assert!(
-            matches!(
-                claim,
-                Claim::NotResponding(Unanswered {
-                    pid: Some(_),
-                    starting: true
-                })
-            ),
-            "reported as still starting"
+            matches!(claim, Claim::Starting(Some(pid)) if pid == std::process::id()),
+            "reported as still starting, not as stuck"
         );
         let waited = started.elapsed();
         assert!(
@@ -553,18 +644,22 @@ mod tests {
     fn a_copy_that_exits_while_asked_is_not_called_hung() {
         let dir = scratch("exiting");
         let path = dir.join("test.sock");
-        // A copy that takes the request and then goes away without answering, its socket with it.
+        // A copy that takes the request and goes away without answering, in
+        // an app's order: the connection closes first, the listener and its
+        // socket file a moment later. Asking again at once still reaches that
+        // listener (its backlog); the launch keeps asking until it is gone.
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let exiting = {
             let path = path.clone();
             std::thread::spawn(move || {
                 let (stream, _) = listener.accept().unwrap();
+                drop(stream);
+                std::thread::sleep(Duration::from_millis(300));
                 let _ = std::fs::remove_file(&path);
                 drop(listener);
-                drop(stream);
             })
         };
-        // The second launch tries again and, nobody being there now, becomes the primary.
+        // Nobody being there any more, the second launch becomes the primary.
         let claim = claim_at(&path, None, waits(2000, 5000));
         exiting.join().unwrap();
         assert!(matches!(claim, Claim::Primary(_)), "not \"not responding\"");
@@ -572,42 +667,95 @@ mod tests {
     }
 
     #[test]
-    fn two_copies_that_exit_while_asked_end_the_launch_quietly() {
-        let dir = scratch("exiting-twice");
+    fn copies_that_keep_exiting_while_asked_end_the_launch_quietly() {
+        let dir = scratch("exiting-always");
         let path = dir.join("test.sock");
-        // Each attempt finds a copy that takes the request and closes without
-        // answering, but keeps its socket: after the one retry, leave quietly.
+        // Every attempt finds a copy that takes the request and closes without
+        // answering, and keeps its socket: after the answer wait, leave quietly.
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let closer = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (stream, _) = listener.accept().unwrap();
-                drop(stream);
-            }
-            listener
-        });
-        let claim = claim_at(&path, None, waits(2000, 5000));
-        drop(closer.join());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closer = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut taken = 0;
+                for stream in listener.incoming() {
+                    drop(stream);
+                    taken += 1;
+                    if stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                }
+                taken
+            })
+        };
+        let started = Instant::now();
+        let claim = claim_at(&path, None, waits(500, 5000));
+        let waited = started.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        drop(std::os::unix::net::UnixStream::connect(&path));
+        let taken = closer.join().unwrap();
         assert!(matches!(claim, Claim::HandedOver), "no hung-copy message");
+        assert!(taken > 2, "asked again in short steps: {taken}");
+        assert!(
+            waited >= Duration::from_millis(500) && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_not_responding_message_names_the_pid() {
-        let hung = |pid| Unanswered {
-            pid,
-            starting: false,
+    fn a_released_copy_lets_the_next_launch_start_at_once() {
+        let dir = scratch("released");
+        let path = dir.join("test.sock");
+        // The primary's UI never comes up (as when it can't open a window),
+        // and it releases the socket before it exits.
+        let Claim::Primary(first) = claim_at(&path, None, WAIT) else {
+            panic!("primary")
         };
-        let starting = |pid| Unanswered {
-            pid,
-            starting: true,
+        first.close();
+        assert!(!path.exists(), "the socket file is removed");
+        let started = Instant::now();
+        let claim = claim_at(&path, None, waits(2000, 15000));
+        assert!(
+            matches!(claim, Claim::Primary(_)),
+            "the next launch is the primary"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn releasing_twice_is_harmless_and_nobody_listens_after() {
+        let dir = scratch("released-refuse");
+        let path = dir.join("test.sock");
+        let Claim::Primary(first) = claim_at(&path, None, WAIT) else {
+            panic!("primary")
         };
+        first.close();
+        first.close();
+        let error = std::os::unix::net::UnixStream::connect(&path).unwrap_err();
+        assert!(nobody_listening(&error), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_messages_name_the_pid() {
         assert_eq!(
-            not_responding_message(hung(Some(42))),
+            not_responding_message(Some(42)),
             "Steam Punk is already running but not responding; close it (PID 42) and start again."
         );
-        assert!(!not_responding_message(hung(None)).contains("PID"));
-        assert!(not_responding_message(starting(Some(42))).contains("still starting (process 42)"));
-        assert!(!not_responding_message(starting(None)).contains("process"));
+        assert!(!not_responding_message(None).contains("PID"));
+        assert_eq!(
+            starting_message(Some(42)),
+            "Steam Punk is still starting (process 42); its window will appear when it is ready."
+        );
+        assert!(!starting_message(None).contains("process"));
+        assert!(!starting_message(Some(1)).contains("start again"));
     }
 
     #[test]
