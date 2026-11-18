@@ -1,25 +1,11 @@
 use std::path::{Path, PathBuf};
 
-/// Locate the Steam client installation directory: the first of the usual
-/// install locations that actually has a steamapps/ subdirectory.
-pub fn steam_client_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    for candidate in [
-        format!("{home}/.local/share/Steam"),
-        format!("{home}/.steam/steam"),
-    ] {
-        let dir = PathBuf::from(candidate);
-        if dir.join("steamapps").is_dir() {
-            return Some(dir);
-        }
-    }
-    None
-}
-
-/// Every Steam client install that has local game metadata (appmanifests and
-/// the library art cache): native Steam and Flatpak Steam. Used only for
-/// looking up names and cover art, never for launching, so a Flatpak install
-/// is included here even though trainers are launched against the native one.
+/// Every Steam client install on this system: native Steam and Flatpak Steam.
+/// Used for game names and cover art (appmanifests, the library art cache) and
+/// to find a running game's compatdata, which is in the libraries of the
+/// install that runs it (`launcher::resolve_launch_target`; a Flatpak game's
+/// Proton commands then run inside its sandbox, see `launcher::proton_command`),
+/// and the other prefixes a .NET runtime can be copied from.
 /// `~/.steam/steam` is usually a symlink to `~/.local/share/Steam`, so
 /// duplicates are dropped by canonical path.
 pub fn metadata_roots() -> Vec<PathBuf> {
@@ -182,6 +168,11 @@ pub fn installed_games(libraries: &[PathBuf]) -> Vec<(u32, String)> {
 
 /// Installed games across every known Steam install (native and Flatpak).
 pub fn all_installed_games() -> Vec<(u32, String)> {
+    installed_games(&all_library_folders())
+}
+
+/// The libraries of every Steam install (`metadata_roots`), each once.
+pub fn all_library_folders() -> Vec<PathBuf> {
     let mut libs: Vec<PathBuf> = Vec::new();
     for root in metadata_roots() {
         for lib in library_folders(&root) {
@@ -190,15 +181,7 @@ pub fn all_installed_games() -> Vec<(u32, String)> {
             }
         }
     }
-    installed_games(&libs)
-}
-
-/// The first library whose steamapps/compatdata contains this AppId.
-pub fn compatdata_dir(libraries: &[PathBuf], appid: &str) -> Option<PathBuf> {
-    libraries
-        .iter()
-        .map(|lib| lib.join("steamapps/compatdata").join(appid))
-        .find(|p| p.is_dir())
+    libs
 }
 
 #[cfg(test)]

@@ -101,10 +101,16 @@ error, and saving an AppID fails instead of wiping the file.
   installed-game matcher.
 - `steam.rs` — locates the local Steam client installs (native and Flatpak),
   library folders, and parses appmanifests (name, installdir, installed games).
-- `setup.rs` — the privileged one-time system-package setup (winetricks,
-  cabextract) via `pkexec`, and the winetricks `dotnet48` fallback: system
-  packages need root, the winetricks install itself only touches the
-  user-owned wine prefix and needs no privilege escalation. pkexec always runs through
+- `setup.rs` — the privileged one-time system-package setup (cabextract, curl) via `pkexec`,
+  and the winetricks `dotnet48` fallback: system packages need root; winetricks is upstream's
+  release script pinned in `WINETRICKS_URL`/`WINETRICKS_SHA256` (bump both together, from a
+  release on github.com/Winetricks/winetricks), downloaded per user to
+  `~/.local/share/steam-punk/tools/winetricks-<release>` and checked on every use, and the
+  install only touches the user-owned wine prefix, with no privilege escalation. Never install
+  winetricks with apt: Debian's and Ubuntu's package depends on the distribution's whole wine.
+  Both root scripts set `umask 022` (pkexec keeps the caller's); install-privileged.sh exits 4
+  when the setup script it installed can't start, so that never reads as a cancelled prompt;
+  privileged-setup.sh refuses a log path that is a symlink. pkexec always runs through
   `run_pkexec`: `setsid` (no controlling terminal) and stdin from /dev/null, so on a desktop
   started from a text console with no polkit agent it fails at once instead of prompting on
   that console. No pkexec on PATH -> `NO_PKEXEC_MESSAGE` (apt's install command: the
@@ -131,7 +137,8 @@ that have no real .NET at all. `launcher::dotnet_status` instead verifies
 everything that actually has to hold for the CLR to load: `clr.dll`
 present, a real (non-builtin) `mscoree.dll`, the CRT libraries `clr.dll`
 imports from system32 (`*_clr0400.dll` — missing these is silent, the CLR
-simply never loads), and a registry `Release` of 4.6.2 or newer
+simply never loads; every one `clr.dll`'s PE import table names, each a
+non-empty file, or .NET 4.8's two when `clr.dll` can't be read), and a registry `Release` of 4.6.2 or newer
 (`DOTNET_462_RELEASE`). While the game's wineserver runs, a `Release` that
 falls short on disk is re-read from the live registry (`proton runinprefix
 reg query`): the server keeps the registry in memory and only writes
@@ -156,7 +163,7 @@ Proton 9 and the `dist/` builds, per-triplet `lib/<arch>-linux-gnu` plus
 `lib/vkd3d` for Proton 10+ and GE; check a new layout's `init_wine` before
 changing this), never the system wine, which is a
 different wine build than the one that made the prefix. The system packages
-are therefore only winetricks and cabextract (no `wine32:i386`). `winetricks
+are therefore only cabextract and curl (no wine, no `wine32:i386`). `winetricks
 -f dotnet48` is used with `-f` (force) because winetricks marks a verb done
 in `winetricks.log` on first attempt regardless of whether it actually
 succeeded. The dialog's manual commands are generated from the same

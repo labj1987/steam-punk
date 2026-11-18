@@ -4,6 +4,33 @@ One `## <version> — <date>` heading per released version, newest first. A rele
 carries its section as written, and the AppStream `<releases>` list is generated from these
 headings. 0.4.6 was built but never released; it is kept under 0.4.7, which first shipped it.
 
+## 0.10.0 — 2026-11-18
+
+- **The one-time .NET setup no longer installs your distribution's wine.** On Debian and
+  Ubuntu, the setup used to install the winetricks package, which pulls in the whole system
+  wine (hundreds of MB) that Steam Punk never uses. Steam Punk now downloads winetricks itself
+  (a fixed release, checked against its known checksum) into `~/.local/share/steam-punk/tools/`,
+  and the password prompt only installs cabextract and curl. A system wine you already have is
+  left alone; if you don't need it, you can remove it yourself.
+- The automatic setup waits for another package install (such as automatic updates right after
+  boot) to finish instead of failing at once, and no longer stops at a configuration-file
+  question nobody can answer.
+- A setup script that could not be started is now reported as such, not as a cancelled
+  password prompt.
+- A game whose prefix is in a different Steam library than an older, unused prefix of the same
+  game, or that is reached through `~/.steam/steam`, is now found correctly: trainers and the
+  .NET setup work on the prefix the running game actually uses.
+- The .NET check now requires every runtime library the installed .NET needs, so a prefix
+  missing one of them is repaired instead of being reported ready (and is not copied to other
+  games).
+- With several games running, games from Flatpak Steam or a second Steam install are shown by
+  name in the game picker, not as "AppId" numbers.
+- Starting a second .NET setup for a game while one is already running no longer lets a third
+  one start alongside it.
+- In the AppID dialog, pressing Enter in an emptied search field skips the association, as the
+  dialog says, and Enter never picks a result of an earlier search.
+- Importing the same trainer twice at once no longer can leave a damaged copy.
+
 ## 0.9.3 — 2026-11-16
 
 - **The window takes your desktop's accent colour.** On GNOME, KDE Plasma and COSMIC, primary

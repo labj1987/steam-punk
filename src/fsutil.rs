@@ -12,6 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// which is flushed to disk and then renamed over the target, and the
 /// directory itself is synced so the rename is durable too.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    write_atomic_mode(path, contents, 0o666)
+}
+
+/// [`write_atomic`] with the new file created with `mode` (before the umask),
+/// so it already has that mode when it appears at `path`.
+pub fn write_atomic_mode(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
     let dir = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -22,6 +29,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(mode)
             .open(&tmp)?;
         f.write_all(contents)?;
         f.sync_all()?;
@@ -87,6 +95,22 @@ mod tests {
         let path = dir.join("cache/42.name.txt");
         write_atomic(&path, b"Game").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"Game");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_atomic_mode_creates_the_file_with_that_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir =
+            std::env::temp_dir().join(format!("steam-punk-fsutil-mode-{}", std::process::id()));
+        let path = dir.join("tool");
+        write_atomic_mode(&path, b"#!/bin/sh\n", 0o755).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o700,
+            0o700,
+            "owner can run it as soon as it appears"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

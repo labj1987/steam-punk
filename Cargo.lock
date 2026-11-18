@@ -6119,7 +6119,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steam-punk"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -6131,6 +6131,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "wayland-backend",
  "wayland-client",

@@ -1,9 +1,10 @@
 //! setup.rs — one-time wine .NET prerequisite setup.
 //!
 //! Split into two phases matching the actual privilege boundary: system
-//! packages need root (via pkexec + a privileged script), while the winetricks
-//! install itself only touches the user-owned wine prefix and needs no
-//! privilege escalation.
+//! packages (cabextract, curl) need root (via pkexec + a privileged script),
+//! while winetricks (a pinned upstream copy kept per user, see
+//! `WINETRICKS_URL`) and the install it runs only touch the user's own files
+//! and the user-owned wine prefix, and need no privilege escalation.
 
 use crate::launcher::{self, LaunchTarget, ProtonWine};
 use anyhow::{bail, Context, Result};
@@ -23,8 +24,10 @@ const INSTALLER: &str = include_str!("../scripts/install-privileged.sh");
 /// are installed from these bytes, never from files next to the binary
 /// (an extracted AppDir is writable by the user), and root checks the
 /// copies it installs against SHA-256 sums computed at build time
-/// (build.rs), so nothing rewritten between the user staging them and root
-/// installing them can get in.
+/// (build.rs), so a staged file that changed between the app writing it and
+/// root installing it is refused. The sums travel as pkexec arguments, so they
+/// do not stop another program of the same user from asking root to install
+/// other files: polkit's admin authentication is the gate for that.
 const SCRIPT_BYTES: &[u8] = include_bytes!("../scripts/privileged-setup.sh");
 const POLICY_BYTES: &[u8] = include_bytes!("../data/io.github.labj1987.SteamPunk.setup.policy");
 const SCRIPT_SHA256: &str = env!("SP_SETUP_SCRIPT_SHA256");
@@ -39,9 +42,24 @@ const WINESERVER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// show. See `install_dotnet48` for `-f`.
 const WINETRICKS_ARGS: [&str; 4] = ["-q", "-f", "dotnet48", "win10"];
 
-/// What the privileged script installs (and `system_prereqs_present` checks).
+/// winetricks is upstream's release script, pinned to this release and its
+/// SHA-256 and kept per user under the app's data dir, never a system
+/// package: Debian's and Ubuntu's winetricks package depends on the
+/// distribution's whole wine, which this app never runs (winetricks runs with
+/// the game's Proton wine). A system wine already installed is left alone.
+const WINETRICKS_VERSION: &str = "20260125";
+const WINETRICKS_URL: &str =
+    "https://raw.githubusercontent.com/Winetricks/winetricks/20260125/src/winetricks";
+const WINETRICKS_SHA256: &str = "431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b";
+
+/// What the privileged script installs: cabextract, which winetricks unpacks
+/// the Microsoft installers with, and curl, which it downloads them with (it
+/// takes aria2c, wget or curl; the winetricks package used to bring one in).
 /// privileged-setup.sh runs exactly this line; a test holds the two together.
-const APT_INSTALL: &str = "apt-get install -y --no-install-recommends winetricks cabextract";
+const APT_INSTALL: &str = "apt-get install -y --no-install-recommends cabextract curl";
+
+/// The download programs winetricks can use, in its own order of preference.
+const DOWNLOADERS: [&str; 3] = ["aria2c", "wget", "curl"];
 
 /// Shown when the winetricks fallback is reached while the game still runs.
 pub const GAME_RUNNING: &str = "The game is still running. The .NET installer can only \
@@ -59,12 +77,13 @@ fn on_path(program: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns true if the one-time system packages are already present — skip
-/// pkexec entirely if so. winetricks drives the game's own Proton wine (see
-/// `install_dotnet48`), so no system wine packages are needed: only
-/// winetricks and the cabextract it unpacks the Microsoft installers with.
+/// Returns true if what the system setup provides is already there — skip
+/// pkexec entirely if so: cabextract and a download program winetricks can
+/// use. winetricks drives the game's own Proton wine (see
+/// `install_dotnet48`), so no system wine packages are needed, and winetricks
+/// itself is the app's own pinned copy.
 pub fn system_prereqs_present() -> bool {
-    let present = on_path("winetricks") && on_path("cabextract");
+    let present = on_path("cabextract") && DOWNLOADERS.iter().any(|d| on_path(d));
     crate::applog::log(&format!("system_prereqs_present -> {present}"));
     present
 }
@@ -125,10 +144,12 @@ pub fn run_system_setup() -> Result<()> {
 
 /// Why the setup did not complete, from pkexec's exit `code` and what it
 /// printed. 126 is a dismissed prompt (COSMIC's and GNOME's agents);
-/// polkit-kde-agent reports its Cancel as 127 "Not authorized". The script
-/// itself never exits with either.
+/// polkit-kde-agent reports its Cancel as 127 "Not authorized". The scripts
+/// themselves never exit with either: install-privileged.sh turns a setup
+/// script that could not be started into 4.
 fn failure_message(code: i32, stderr: &str) -> String {
     match code {
+        4 => NOT_STARTED.to_string(),
         127 if no_agent(stderr) => NO_AGENT_MESSAGE.to_string(),
         126 => CANCELLED.to_string(),
         127 if stderr.contains("Not authorized") => CANCELLED.to_string(),
@@ -138,6 +159,8 @@ fn failure_message(code: i32, stderr: &str) -> String {
 }
 
 const CANCELLED: &str = "Authorization was cancelled or refused, so nothing was changed.";
+
+const NOT_STARTED: &str = "The setup script was installed but could not be started (is /usr mounted noexec?), so no packages were installed.";
 
 /// What a system without pkexec is told. The automatic setup is only offered
 /// where apt-get is (`apt_available`), so the install command is apt's.
@@ -248,13 +271,18 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
         crate::applog::log("install_dotnet48: the prefix's wineserver is still running");
         bail!(GAME_RUNNING);
     }
+    let winetricks = winetricks_path()?;
+    ensure_winetricks(&winetricks)?;
     crate::applog::log(&format!(
-        "install_dotnet48: running {} winetricks {}",
+        "install_dotnet48: running {} {} {}",
         wine.shell_env(),
+        winetricks.display(),
         WINETRICKS_ARGS.join(" ")
     ));
-    let mut cmd = Command::new("winetricks");
+    let mut cmd = Command::new(&winetricks);
     wine.apply(&mut cmd);
+    // A pinned copy: its check for a newer release would only warn.
+    cmd.env("WINETRICKS_LATEST_VERSION_CHECK", "disabled");
     cmd.args(WINETRICKS_ARGS);
     let output = match launcher::run_with_timeout(
         cmd,
@@ -312,6 +340,102 @@ pub fn install_dotnet48(target: &LaunchTarget) -> Result<()> {
     Ok(())
 }
 
+/// Where the pinned winetricks is kept: `~/.local/share/steam-punk/tools/`,
+/// named by its release.
+pub fn winetricks_path() -> Result<PathBuf> {
+    Ok(crate::library::data_dir()?
+        .join("tools")
+        .join(format!("winetricks-{WINETRICKS_VERSION}")))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Makes `path` the pinned winetricks: kept when it already is (checked by its
+/// SHA-256 on every use), else downloaded, checked and stored.
+fn ensure_winetricks(path: &Path) -> Result<()> {
+    if holds(path, WINETRICKS_SHA256) {
+        return make_executable(path);
+    }
+    crate::applog::log(&format!(
+        "install_dotnet48: downloading winetricks {WINETRICKS_VERSION} from {WINETRICKS_URL}"
+    ));
+    let bytes = download(WINETRICKS_URL)
+        .with_context(|| format!("Downloading winetricks from {WINETRICKS_URL}"))?;
+    store_checked(path, &bytes, WINETRICKS_SHA256)
+}
+
+fn holds(path: &Path, sha256: &str) -> bool {
+    std::fs::read(path).is_ok_and(|b| sha256_hex(&b) == sha256)
+}
+
+/// Stores `bytes` at `path` as an executable, only when their SHA-256 is
+/// `sha256`; nothing is written otherwise.
+fn store_checked(path: &Path, bytes: &[u8], sha256: &str) -> Result<()> {
+    let got = sha256_hex(bytes);
+    if got != sha256 {
+        bail!(
+            "The downloaded winetricks is not the expected file (SHA-256 {got}, expected \
+             {sha256}), so it was not used."
+        );
+    }
+    // Created executable, so a concurrent setup never runs a copy that is
+    // in place but not yet executable.
+    crate::fsutil::write_atomic_mode(path, bytes, 0o755)?;
+    make_executable(path)?;
+    remove_other_pins(path);
+    Ok(())
+}
+
+/// Deletes winetricks copies of other (earlier) pinned releases next to
+/// `path`, so a pin bump doesn't leave the old one behind.
+fn remove_other_pins(path: &Path) {
+    let (Some(dir), Some(keep)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name != keep && name.to_string_lossy().starts_with("winetricks-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("making {} executable", path.display()))
+}
+
+/// GETs `url` (https only) and returns the body. Runs on the app's Tokio
+/// runtime when called from one of its blocking threads (the installer runs
+/// on one), else on a runtime of its own.
+fn download(url: &str) -> Result<Vec<u8>> {
+    let fetch = async {
+        let client = reqwest::Client::builder()
+            .https_only(true)
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
+        let response = client.get(url).send().await?.error_for_status()?;
+        Ok::<_, anyhow::Error>(response.bytes().await?.to_vec())
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(fetch),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(fetch),
+    }
+}
+
 /// Kills every wine process in the prefix and its wineserver
 /// (`wineserver -k`, Proton's own). Only used once the game is closed, when
 /// whatever runs in the prefix is the installer's.
@@ -338,21 +462,33 @@ fn last_lines(text: &str, n: usize) -> String {
 }
 
 /// Exactly what the automatic setup runs, for the dialog's manual
-/// instructions: the system packages (with root), then winetricks with the
-/// game's Proton wine, with the game closed.
+/// instructions: the system packages (with root), the pinned winetricks
+/// download and its check, then winetricks with the game's Proton wine, with
+/// the game closed.
 pub fn manual_commands(target: &LaunchTarget, apt: bool) -> String {
     let packages = if apt {
         format!("sudo {APT_INSTALL}")
     } else {
-        "# Install winetricks and cabextract with your distribution's package manager.".to_string()
+        "# Install cabextract and curl with your distribution's package manager.".to_string()
     };
-    let winetricks = match ProtonWine::for_target(target) {
-        Ok(wine) => format!(
-            "# Quit the game, then:\n{} winetricks {}",
-            wine.shell_env(),
-            WINETRICKS_ARGS.join(" ")
-        ),
-        Err(e) => format!("# {e}"),
+    let winetricks = match (ProtonWine::for_target(target), winetricks_path()) {
+        (Ok(wine), Ok(path)) => {
+            let quoted = launcher::shell_quote(&path.to_string_lossy());
+            let dir = launcher::shell_quote(
+                &path
+                    .parent()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            format!(
+                "mkdir -p {dir} && curl -fLo {quoted} {WINETRICKS_URL} && \
+                 printf '%s  %s\\n' {WINETRICKS_SHA256} {quoted} | sha256sum -c && chmod 755 {quoted}\n\
+                 # Quit the game, then:\n{} WINETRICKS_LATEST_VERSION_CHECK=disabled {quoted} {}",
+                wine.shell_env(),
+                WINETRICKS_ARGS.join(" ")
+            )
+        }
+        (Err(e), _) | (_, Err(e)) => format!("# {e}"),
     };
     format!("{packages}\n{winetricks}")
 }
@@ -478,9 +614,24 @@ mod tests {
         let text = manual_commands(&target(&proton), true);
         let mut lines = text.lines();
         assert_eq!(lines.next(), Some(format!("sudo {APT_INSTALL}").as_str()));
+        let wt = winetricks_path().unwrap();
+        let wt_quoted = launcher::shell_quote(&wt.to_string_lossy());
+        let fetch = lines.next().unwrap();
+        assert!(
+            fetch.contains(&format!("curl -fLo {wt_quoted} {WINETRICKS_URL} && "))
+                && fetch.contains(&format!(
+                    "printf '%s  %s\\n' {WINETRICKS_SHA256} {wt_quoted} | sha256sum -c"
+                )),
+            "{fetch}"
+        );
         assert_eq!(lines.next(), Some("# Quit the game, then:"));
         let cmd = lines.next().unwrap();
-        assert!(cmd.ends_with(" winetricks -q -f dotnet48 win10"), "{cmd}");
+        let run = format!(" {wt_quoted} -q -f dotnet48 win10");
+        assert!(cmd.ends_with(&run), "{cmd}");
+        assert!(
+            cmd.contains(" WINETRICKS_LATEST_VERSION_CHECK=disabled "),
+            "{cmd}"
+        );
         assert!(
             cmd.contains("WINEPREFIX='/mnt/My Games/steamapps/compatdata/1/pfx'"),
             "{cmd}"
@@ -493,10 +644,7 @@ mod tests {
         // The command really sets that environment when run by a shell.
         let out = Command::new("sh")
             .arg("-c")
-            .arg(cmd.replace(
-                " winetricks -q -f dotnet48 win10",
-                " sh -c 'printf %s \"$WINE|$PATH\"'",
-            ))
+            .arg(cmd.replace(&run, " sh -c 'printf %s \"$WINE|$PATH\"'"))
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap();
@@ -507,7 +655,7 @@ mod tests {
 
         let other = manual_commands(&target(&proton), false);
         assert!(
-            other.starts_with("# Install winetricks and cabextract"),
+            other.starts_with("# Install cabextract and curl"),
             "{other}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -522,12 +670,95 @@ mod tests {
     #[test]
     fn the_privileged_script_runs_exactly_the_install_line() {
         let script = std::str::from_utf8(SCRIPT_BYTES).unwrap();
+        let line = APT_INSTALL.replacen("apt-get ", "apt-get \"${APT_OPTS[@]}\" ", 1);
         assert!(
             script
                 .lines()
-                .any(|l| l.contains(&format!("if ! {APT_INSTALL} >>"))),
+                .any(|l| l.contains(&format!("if ! {line} >&3"))),
             "privileged-setup.sh no longer runs `{APT_INSTALL}`"
         );
+        assert!(!script.contains("winetricks cabextract"));
+        for script in [script, INSTALLER] {
+            assert!(
+                script.lines().any(|l| l == "umask 022"),
+                "both root scripts set a strict umask"
+            );
+        }
+    }
+
+    #[test]
+    fn the_winetricks_download_is_used_only_when_its_sha256_matches() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let dir = std::env::temp_dir().join(format!("steam-punk-setup-wt-{}", std::process::id()));
+        let path = dir.join("tools/winetricks-test");
+        let body = b"#!/bin/sh\necho pinned\n";
+        let sum = sha256_hex(body);
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        let err = store_checked(&path, b"#!/bin/sh\necho other\n", &sum).unwrap_err();
+        assert!(err.to_string().contains("not the expected file"), "{err}");
+        assert!(!path.exists(), "nothing is stored");
+        let old = dir.join("tools/winetricks-20240101");
+        let unrelated = dir.join("tools/notes.txt");
+        std::fs::write(&old, b"old pin").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        store_checked(&path, body, &sum).unwrap();
+        assert!(holds(&path, &sum));
+        assert!(!old.exists(), "an earlier pinned release is removed");
+        assert!(unrelated.exists(), "other files are left alone");
+        let out = Command::new(&path).output().unwrap();
+        assert_eq!(out.stdout, b"pinned\n", "stored as an executable");
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(!holds(&path, &sum), "a changed copy is downloaded again");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(WINETRICKS_SHA256.len(), 64);
+        assert!(WINETRICKS_URL.contains(&format!("/{WINETRICKS_VERSION}/")));
+    }
+
+    #[test]
+    fn a_setup_script_that_cannot_start_is_not_a_cancel() {
+        assert_eq!(failure_message(4, ""), NOT_STARTED);
+        assert!(!NOT_STARTED.contains("cancelled"));
+        // The installer, run against scratch destinations, with a setup script whose
+        // interpreter is missing: it is installed (0755, its directory too), then
+        // can't start, which is 4.
+        let dir =
+            std::env::temp_dir().join(format!("steam-punk-setup-inst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = b"#!/nonexistent/interpreter\n";
+        let policy = b"<policyconfig/>\n";
+        std::fs::write(dir.join("staged-script"), script).unwrap();
+        std::fs::write(dir.join("staged-policy"), policy).unwrap();
+        let installed = dir.join("lib/steam-punk/privileged-setup.sh");
+        let run = |script_sum: &str| {
+            Command::new("bash")
+                .args(["-c", INSTALLER, "bash"])
+                .arg(dir.join("staged-script"))
+                .arg(&installed)
+                .arg(script_sum)
+                .arg(dir.join("staged-policy"))
+                .arg(dir.join("actions/policy"))
+                .arg(sha256_hex(policy))
+                .output()
+                .unwrap()
+        };
+        let out = run(&sha256_hex(b"something else"));
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a changed staged file is refused"
+        );
+        assert!(!installed.exists());
+        let out = run(&sha256_hex(script));
+        assert_eq!(out.status.code(), Some(4), "{out:?}");
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&installed), 0o755);
+        assert_eq!(mode(installed.parent().unwrap()), 0o755);
+        assert_eq!(mode(&dir.join("actions/policy")), 0o644);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

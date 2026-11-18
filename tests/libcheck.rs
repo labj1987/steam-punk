@@ -614,13 +614,17 @@ fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
         called(&show_with(&dir, &log, "Steam Punk", "x"))[..2],
         ["zenity", "kdialog"]
     );
-    // A dialog that leaves a process holding its stderr is not waited for.
+    // A dialog that leaves a process holding its stderr is not waited for. The PATH the
+    // block runs with has no sleep, so it is named by its full path, and its PID is
+    // written down to show it really started (and still holds the stderr).
     std::fs::remove_file(&log).unwrap();
+    let pid_file = dir.join("held-stderr.pid");
     script_file(
         &dir.join("zenity"),
         &format!(
-            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :9999' >&2\nsleep 5 &\nexit 1\n",
-            log.display()
+            "#!/bin/sh\necho '== zenity' >> '{}'\necho 'cannot open display: :9999' >&2\n/usr/bin/sleep 5 &\necho $! > '{}'\nexit 1\n",
+            log.display(),
+            pid_file.display()
         ),
     );
     let started = std::time::Instant::now();
@@ -632,6 +636,20 @@ fn the_message_goes_to_the_first_program_that_shows_it_in_one_order() {
         started.elapsed() < std::time::Duration::from_secs(3),
         "{:?}",
         started.elapsed()
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .expect("the dialog's background process started")
+        .trim()
+        .parse()
+        .unwrap();
+    let holder = std::fs::read_link(format!("/proc/{pid}/fd/2"));
+    // SAFETY: kill(2) on the PID this test's own fake dialog started.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    assert!(
+        holder.is_ok(),
+        "the background process was still running, holding its stderr"
     );
     // A dialog closed with its X (exit 1) was seen: nothing else is shown.
     std::fs::remove_file(&log).unwrap();

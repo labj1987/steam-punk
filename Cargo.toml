@@ -1,6 +1,6 @@
 [package]
 name = "steam-punk"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.100"
 description = "Launch Windows game trainers through Proton against a running Steam game's wine session"
@@ -31,6 +31,9 @@ raw-window-handle = "0.6"
 wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# The pinned winetricks download is checked against its SHA-256 (setup.rs); the version already
+# in the graph.
+sha2 = "0.10"
 
 [lints.cargo]
 unused_dependencies = "warn"
