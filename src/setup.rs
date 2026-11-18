@@ -384,8 +384,29 @@ fn store_checked(path: &Path, bytes: &[u8], sha256: &str) -> Result<()> {
              {sha256}), so it was not used."
         );
     }
-    crate::fsutil::write_atomic(path, bytes)?;
-    make_executable(path)
+    // Created executable, so a concurrent setup never runs a copy that is
+    // in place but not yet executable.
+    crate::fsutil::write_atomic_mode(path, bytes, 0o755)?;
+    make_executable(path)?;
+    remove_other_pins(path);
+    Ok(())
+}
+
+/// Deletes winetricks copies of other (earlier) pinned releases next to
+/// `path`, so a pin bump doesn't leave the old one behind.
+fn remove_other_pins(path: &Path) {
+    let (Some(dir), Some(keep)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name != keep && name.to_string_lossy().starts_with("winetricks-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn make_executable(path: &Path) -> Result<()> {
@@ -448,8 +469,7 @@ pub fn manual_commands(target: &LaunchTarget, apt: bool) -> String {
     let packages = if apt {
         format!("sudo {APT_INSTALL}")
     } else {
-        "# Install cabextract and curl (or wget) with your distribution's package manager."
-            .to_string()
+        "# Install cabextract and curl with your distribution's package manager.".to_string()
     };
     let winetricks = match (ProtonWine::for_target(target), winetricks_path()) {
         (Ok(wine), Ok(path)) => {
@@ -676,11 +696,18 @@ mod tests {
         let path = dir.join("tools/winetricks-test");
         let body = b"#!/bin/sh\necho pinned\n";
         let sum = sha256_hex(body);
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
         let err = store_checked(&path, b"#!/bin/sh\necho other\n", &sum).unwrap_err();
         assert!(err.to_string().contains("not the expected file"), "{err}");
         assert!(!path.exists(), "nothing is stored");
+        let old = dir.join("tools/winetricks-20240101");
+        let unrelated = dir.join("tools/notes.txt");
+        std::fs::write(&old, b"old pin").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
         store_checked(&path, body, &sum).unwrap();
         assert!(holds(&path, &sum));
+        assert!(!old.exists(), "an earlier pinned release is removed");
+        assert!(unrelated.exists(), "other files are left alone");
         let out = Command::new(&path).output().unwrap();
         assert_eq!(out.stdout, b"pinned\n", "stored as an executable");
         std::fs::write(&path, b"changed").unwrap();
