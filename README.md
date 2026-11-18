@@ -70,13 +70,17 @@ If the game's prefix doesn't have a real .NET Framework 4.6.2 or newer yet
 bundled wine-mono), the app offers a one-time setup. It first tries to copy a
 working runtime from another game's Proton prefix in any of your Steam
 libraries, which works with the game running. Otherwise it installs `dotnet48`
-with `winetricks`, run with the game's own Proton wine. That installer needs the
+with [winetricks](https://github.com/Winetricks/winetricks), run with the game's own
+Proton wine. The app downloads winetricks itself, a fixed release checked against its
+known checksum, into `~/.local/share/steam-punk/tools/`; no system wine is installed
+(one already installed is left alone). That installer needs the
 game closed: the app asks you to quit the game, installs, then tells you to
 start the game again and launch the trainer. The installer downloads about
 200 MB the first time; a step that hangs is stopped after a time limit, and the
-message names it. If winetricks or cabextract is missing and you choose the
-automatic setup, they are installed after a password prompt on Debian/Ubuntu;
-elsewhere the manual commands are shown. This modifies the game's Wine prefix:
+message names it. If cabextract (or a download program: curl, wget or aria2c)
+is missing and you choose the automatic setup, cabextract and curl are installed
+after a password prompt on Debian/Ubuntu; elsewhere the manual commands are
+shown. This modifies the game's Wine prefix:
 it copies in the .NET runtimes and imports a `.reg` file, or, through
 winetricks, installs `dotnet48` and sets the prefix to Windows 10.
 
@@ -147,8 +151,9 @@ AppImageUpdate-compatible tools can update it in place.
 
 The automatic setup installs `/usr/lib/steam-punk/privileged-setup.sh` and the
 polkit policy `/usr/share/polkit-1/actions/io.github.labj1987.SteamPunk.setup.policy`,
-installs `winetricks` and `cabextract` with apt, and logs to
-`/var/log/steam-punk.log`.
+installs `cabextract` and `curl` with apt, and logs to
+`/var/log/steam-punk.log`. winetricks is not a system package here: the app keeps
+its own copy in `~/.local/share/steam-punk/tools/`.
 
 To uninstall, delete the AppImage and `~/.local/share/steam-punk/`; if the
 automatic setup ran, also remove `/usr/lib/steam-punk/`, that polkit policy and

@@ -10,10 +10,16 @@
 # pinned when the app was built (6 arguments in all).
 #
 # Root first copies each staged file into its own root-owned temp file and
-# verifies that copy against the pinned checksum, so nothing the user can
-# rewrite after the check is ever installed (no TOCTOU window).
+# verifies that copy against the checksum, so nothing the user can rewrite
+# after the check is ever installed (no TOCTOU window). The checksums come in
+# as arguments from the calling app, so they catch a staged file that changed
+# after the app wrote it, not a caller of the user's own that passes other
+# files and sums: the admin authentication polkit asks for is that gate.
 
 set -uo pipefail
+# pkexec keeps the caller's umask: with a lax one (000), `install -D` would
+# create a world-writable /usr/lib/steam-punk.
+umask 022
 
 install_verified() {
     local src="$1" dst="$2" mode="$3" sum="$4" tmp
@@ -24,7 +30,7 @@ install_verified() {
         rm -f "$tmp"
         return 1
     fi
-    install -D -m "$mode" "$tmp" "$dst"
+    install -d -m 755 "$(dirname "$dst")" && install -m "$mode" "$tmp" "$dst"
     local rc=$?
     rm -f "$tmp"
     return $rc
@@ -36,4 +42,12 @@ if [[ $# -ne 6 ]]; then
 fi
 install_verified "$1" "$2" 755 "$3" || exit 1
 install_verified "$4" "$5" 644 "$6" || exit 1
-exec "$2"
+# Not exec: when the script can't be started (/usr mounted noexec), bash's
+# 126/127 would read as pkexec's "authorization cancelled". 4 says what it is.
+"$2"
+rc=$?
+if [[ $rc -eq 126 || $rc -eq 127 ]]; then
+    echo "steam-punk: could not run $2 (exit $rc)" >&2
+    exit 4
+fi
+exit $rc
