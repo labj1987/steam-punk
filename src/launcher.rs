@@ -93,9 +93,9 @@ fn appid_from_cmdline(args: &[&str]) -> Option<u32> {
 
 /// Running games with display names resolved from their Steam appmanifests.
 pub fn running_games() -> Vec<RunningGame> {
-    let libraries = steam::steam_client_dir()
-        .map(|dir| steam::library_folders(&dir))
-        .unwrap_or_default();
+    // Every Steam install's libraries (native and Flatpak): a game's appmanifest is in
+    // the install that runs it.
+    let libraries = steam::all_library_folders();
 
     let games: Vec<RunningGame> = find_running_appids()
         .into_iter()
@@ -131,7 +131,6 @@ struct GameServer {
 /// config_info can be stale (observed: pointing at a different Proton build
 /// than the one actually running).
 fn find_game_wineserver(compatdata_dir: &Path) -> Option<GameServer> {
-    let target = normalize_lexical(compatdata_dir);
     let entries = std::fs::read_dir("/proc").ok()?;
 
     for entry in entries.flatten() {
@@ -159,7 +158,7 @@ fn find_game_wineserver(compatdata_dir: &Path) -> Option<GameServer> {
         let matches_prefix = vars
             .iter()
             .filter_map(|kv| kv.strip_prefix("STEAM_COMPAT_DATA_PATH="))
-            .any(|v| normalize_lexical(Path::new(v)) == target);
+            .any(|v| same_location(Path::new(v), compatdata_dir));
         if matches_prefix {
             return Some(GameServer {
                 pid,
@@ -215,6 +214,23 @@ fn strip_deleted(link: PathBuf) -> PathBuf {
     }
 }
 
+/// Whether two paths name the same file or directory. The server's
+/// `STEAM_COMPAT_DATA_PATH` and the library path found here can be different
+/// spellings of one prefix (`~/.steam/steam` is usually a symlink to
+/// `~/.local/share/Steam`), so when both exist they are compared by device and
+/// inode; otherwise (gone, or not reachable from here) by their lexically
+/// normalised paths.
+fn same_location(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    if normalize_lexical(a) == normalize_lexical(b) {
+        return true;
+    }
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
 /// Resolve `..`/`.` components without touching the filesystem (no
 /// canonicalize — components may not all exist, and we don't want symlink
 /// resolution changing the answer).
@@ -255,6 +271,30 @@ fn find_proton_dir_from_config_info(compatdata_dir: &Path) -> Option<PathBuf> {
     proton_dir_from_config_line(contents.lines().nth(1)?)
 }
 
+/// Every `compatdata/<appid>` in any library of any of `roots`, each with the
+/// Steam install it was found through, in order, a directory reached by two
+/// spellings (a symlinked install, a library listed twice) only once. An old
+/// prefix left in one library must not hide the one the running game uses in
+/// another.
+fn compatdata_candidates(roots: &[PathBuf], appid: u32) -> Vec<(PathBuf, PathBuf)> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut candidates = Vec::new();
+    for root in roots {
+        for lib in steam::library_folders(root) {
+            let dir = lib.join("steamapps/compatdata").join(appid.to_string());
+            if !dir.is_dir() {
+                continue;
+            }
+            let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if !seen.contains(&canon) {
+                seen.push(canon);
+                candidates.push((root.clone(), dir));
+            }
+        }
+    }
+    candidates
+}
+
 /// Resolve everything needed to launch against a specific running game: its
 /// compatdata and the Proton build whose wineserver it's actually using. The
 /// AppId is passed in rather than discovered here, so that choosing between
@@ -272,13 +312,7 @@ pub fn resolve_launch_target(appid: u32) -> Result<LaunchTarget> {
     if roots.is_empty() {
         return Err(anyhow!("Could not find a Steam installation."));
     }
-    let candidates: Vec<(PathBuf, PathBuf)> = roots
-        .iter()
-        .filter_map(|root| {
-            let libraries = steam::library_folders(root);
-            steam::compatdata_dir(&libraries, &appid.to_string()).map(|c| (root.clone(), c))
-        })
-        .collect();
+    let candidates = compatdata_candidates(&roots, appid);
     crate::applog::log(&format!(
         "resolve_launch_target: compatdata for AppId {appid} -> {candidates:?}"
     ));
@@ -411,6 +445,12 @@ const DOTNET_462_RELEASE: u32 = 394802;
 /// process dies before `main`.
 const CLR_CRT_SUFFIX: &str = "_clr0400.dll";
 
+/// What .NET 4.8's 64-bit `clr.dll` imports from system32 (read from its import
+/// table): the CRT libraries every prefix needs when `clr.dll` itself can't be
+/// read. Otherwise the list comes from that `clr.dll`'s own imports, since other
+/// 4.x releases link other CRT builds.
+const CLR_CRT_48: [&str; 2] = ["vcruntime140_clr0400.dll", "ucrtbase_clr0400.dll"];
+
 /// Everything that has to be true for a modern .NET trainer to actually run.
 pub struct DotnetStatus {
     pub clr_present: bool,
@@ -463,14 +503,91 @@ fn find_file_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     })
 }
 
-fn dir_has_suffix_ci(dir: &Path, suffix: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+/// The DLL names in a PE file's import table, or None when it is not a PE
+/// image this can read. Only the import directory is walked: the data
+/// directory, the section table and the NUL-terminated names it points to.
+fn pe_imports(bytes: &[u8]) -> Option<Vec<String>> {
+    let u16_at = |at: usize| -> Option<usize> {
+        Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize)
     };
-    entries.flatten().any(|e| {
-        e.file_name()
-            .to_str()
-            .is_some_and(|n| n.to_ascii_lowercase().ends_with(suffix))
+    let u32_at = |at: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize)
+    };
+    if bytes.get(..2)? != b"MZ" {
+        return None;
+    }
+    let pe = u32_at(0x3c)?;
+    if bytes.get(pe..pe + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = pe + 4;
+    let sections = u16_at(coff + 2)?;
+    let optional = coff + 20;
+    let optional_size = u16_at(coff + 16)?;
+    let directories = match u16_at(optional)? {
+        0x10b => optional + 96,  // PE32
+        0x20b => optional + 112, // PE32+
+        _ => return None,
+    };
+    // Data directory 1 is the import table.
+    let import_rva = u32_at(directories + 8)?;
+    if import_rva == 0 {
+        return Some(Vec::new());
+    }
+    let table = optional + optional_size;
+    let to_offset = |rva: usize| -> Option<usize> {
+        (0..sections).find_map(|i| {
+            let s = table + i * 40;
+            let size = u32_at(s + 8)?.max(u32_at(s + 16)?);
+            let va = u32_at(s + 12)?;
+            (rva >= va && rva < va + size).then(|| rva - va + u32_at(s + 20).unwrap_or(0))
+        })
+    };
+    let mut names = Vec::new();
+    let mut at = to_offset(import_rva)?;
+    loop {
+        let descriptor = bytes.get(at..at + 20)?;
+        if descriptor.iter().all(|&b| b == 0) {
+            break;
+        }
+        let name_at = to_offset(u32_at(at + 12)?)?;
+        let name = bytes.get(name_at..)?;
+        let end = name.iter().position(|&b| b == 0)?;
+        names.push(String::from_utf8_lossy(&name[..end]).into_owned());
+        at += 20;
+        if names.len() > 4096 {
+            return None;
+        }
+    }
+    Some(names)
+}
+
+/// The CRT libraries (`*_clr0400.dll`) `clr.dll` needs in system32, lowercased:
+/// its own imports when it can be read, else .NET 4.8's (`CLR_CRT_48`).
+fn clr_crt_needed(clr: &Path) -> Vec<String> {
+    let from_imports: Option<Vec<String>> = std::fs::read(clr)
+        .ok()
+        .and_then(|b| pe_imports(&b))
+        .map(|names| {
+            let mut crt: Vec<String> = names
+                .into_iter()
+                .map(|n| n.to_ascii_lowercase())
+                .filter(|n| n.ends_with(CLR_CRT_SUFFIX))
+                .collect();
+            crt.sort();
+            crt.dedup();
+            crt
+        })
+        .filter(|crt| !crt.is_empty());
+    from_imports.unwrap_or_else(|| CLR_CRT_48.iter().map(|n| n.to_string()).collect())
+}
+
+/// Every one of `names` is in `dir` (any casing) as a non-empty file.
+fn all_usable_ci(dir: &Path, names: &[String]) -> bool {
+    names.iter().all(|name| {
+        find_file_ci(dir, name)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .is_some_and(|m| m.is_file() && m.len() > 0)
     })
 }
 
@@ -501,12 +618,11 @@ fn parse_dotnet_release(text: &str) -> Option<u32> {
 pub fn dotnet_status(prefix: &Path) -> DotnetStatus {
     let system32 = prefix.join("drive_c/windows/system32");
     let mscoree = system32.join("mscoree.dll");
+    let clr = prefix.join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll");
     DotnetStatus {
-        clr_present: prefix
-            .join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll")
-            .is_file(),
+        clr_present: clr.is_file(),
         mscoree_native: mscoree.is_file() && !is_wine_builtin_dll(&mscoree),
-        crt_present: dir_has_suffix_ci(&system32, CLR_CRT_SUFFIX),
+        crt_present: all_usable_ci(&system32, &clr_crt_needed(&clr)),
         release: dotnet_release(prefix),
     }
 }
@@ -2130,12 +2246,143 @@ mod tests {
         std::fs::create_dir_all(&sys32).unwrap();
         std::fs::write(sys32.join("mscoree.dll"), b"MZ real").unwrap();
         std::fs::write(sys32.join("vcruntime140_clr0400.dll"), b"MZ real").unwrap();
+        std::fs::write(sys32.join("ucrtbase_clr0400.dll"), b"MZ real").unwrap();
         std::fs::write(
             pfx.join("system.reg"),
             "[Software\\\\Microsoft\\\\NET Framework Setup\\\\NDP\\\\v4\\\\Full] 1\n\"Release\"=dword:00080ff4\n",
         )
         .unwrap();
         assert!(dotnet_status(pfx).is_usable());
+    }
+
+    /// A minimal PE32+ image whose import table names `dlls`.
+    fn fake_pe(dlls: &[&str]) -> Vec<u8> {
+        let mut b = vec![0u8; 0x400];
+        let put32 = |b: &mut Vec<u8>, at: usize, v: u32| {
+            b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let put16 = |b: &mut Vec<u8>, at: usize, v: u16| {
+            b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        };
+        b[..2].copy_from_slice(b"MZ");
+        put32(&mut b, 0x3c, 0x80);
+        b[0x80..0x84].copy_from_slice(b"PE\0\0");
+        put16(&mut b, 0x84, 0x8664);
+        put16(&mut b, 0x86, 1); // one section
+        put16(&mut b, 0x94, 240); // optional header size
+        put16(&mut b, 0x98, 0x20b);
+        put32(&mut b, 0x98 + 112 + 8, 0x1000); // import table RVA
+        put32(&mut b, 0x98 + 112 + 12, 20 * (dlls.len() as u32 + 1));
+        let section = 0x98 + 240;
+        put32(&mut b, section + 8, 0x200);
+        put32(&mut b, section + 12, 0x1000);
+        put32(&mut b, section + 16, 0x200);
+        put32(&mut b, section + 20, 0x200);
+        let mut name_rva = 0x1100u32;
+        for (i, dll) in dlls.iter().enumerate() {
+            put32(&mut b, 0x200 + i * 20 + 12, name_rva);
+            let at = (name_rva - 0x1000 + 0x200) as usize;
+            b[at..at + dll.len()].copy_from_slice(dll.as_bytes());
+            name_rva += dll.len() as u32 + 1;
+        }
+        b
+    }
+
+    #[test]
+    fn pe_imports_are_read_from_the_import_table() {
+        assert_eq!(
+            pe_imports(&fake_pe(&["KERNEL32.dll", "VCRUNTIME140_CLR0400.dll"])),
+            Some(vec![
+                "KERNEL32.dll".to_string(),
+                "VCRUNTIME140_CLR0400.dll".to_string()
+            ])
+        );
+        assert_eq!(pe_imports(b"MZ real"), None);
+        assert_eq!(pe_imports(b""), None);
+    }
+
+    #[test]
+    fn every_crt_library_clr_imports_must_be_a_usable_file() {
+        let s = Scratch::new("clrcrt");
+        let pfx = s.0.join("pfx");
+        fake_dotnet_prefix(&pfx);
+        let sys32 = pfx.join("drive_c/windows/system32");
+        let clr = pfx.join("drive_c/windows/Microsoft.NET/Framework64/v4.0.30319/clr.dll");
+        // An unreadable clr.dll: .NET 4.8's two, both needed.
+        std::fs::remove_file(sys32.join("ucrtbase_clr0400.dll")).unwrap();
+        assert!(
+            !dotnet_status(&pfx).crt_present,
+            "one of the two is not enough"
+        );
+        std::fs::write(sys32.join("ucrtbase_clr0400.dll"), b"").unwrap();
+        assert!(!dotnet_status(&pfx).crt_present, "an empty file is not one");
+        std::fs::write(sys32.join("UCRTBASE_CLR0400.DLL"), b"MZ").unwrap();
+        std::fs::remove_file(sys32.join("ucrtbase_clr0400.dll")).unwrap();
+        assert!(dotnet_status(&pfx).crt_present, "any casing");
+        // A readable clr.dll decides: here it also needs msvcr120_clr0400.dll.
+        std::fs::write(
+            &clr,
+            fake_pe(&[
+                "KERNEL32.dll",
+                "VCRUNTIME140_CLR0400.dll",
+                "msvcr120_clr0400.dll",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            clr_crt_needed(&clr),
+            ["msvcr120_clr0400.dll", "vcruntime140_clr0400.dll"]
+        );
+        assert!(!dotnet_status(&pfx).crt_present);
+        std::fs::write(sys32.join("msvcr120_clr0400.dll"), b"MZ").unwrap();
+        assert!(dotnet_status(&pfx).is_usable());
+    }
+
+    #[test]
+    fn the_running_server_is_matched_whatever_the_prefix_path_spelling() {
+        let s = Scratch::new("samepath");
+        let real = s.0.join("local/share/Steam/steamapps/compatdata/1");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(s.0.join("local/share/Steam"), s.0.join("steam")).unwrap();
+        let via_link = s.0.join("steam/steamapps/compatdata/1");
+        assert!(same_location(&via_link, &real));
+        assert!(same_location(&real.join("../1"), &real));
+        assert!(!same_location(&s.0.join("local"), &real));
+        // Paths that don't exist here are compared as written.
+        assert!(same_location(
+            Path::new("/gone/a/../b"),
+            Path::new("/gone/b")
+        ));
+        assert!(!same_location(Path::new("/gone/a"), Path::new("/gone/b")));
+    }
+
+    #[test]
+    fn every_library_with_the_games_compatdata_is_a_candidate() {
+        let s = Scratch::new("candidates");
+        let steam = s.0.join("Steam");
+        let other = s.0.join("Other Library");
+        std::fs::create_dir_all(steam.join("steamapps/compatdata/7")).unwrap();
+        std::fs::create_dir_all(other.join("steamapps/compatdata/7")).unwrap();
+        std::fs::write(
+            steam.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                steam.display(),
+                other.display()
+            ),
+        )
+        .unwrap();
+        // A second spelling of the same install adds nothing.
+        std::os::unix::fs::symlink(&steam, s.0.join("steam-link")).unwrap();
+        let roots = vec![steam.clone(), s.0.join("steam-link")];
+        assert_eq!(
+            compatdata_candidates(&roots, 7),
+            vec![
+                (steam.clone(), steam.join("steamapps/compatdata/7")),
+                (steam.clone(), other.join("steamapps/compatdata/7")),
+            ]
+        );
+        assert!(compatdata_candidates(&roots, 8).is_empty());
     }
 
     #[test]
@@ -2549,7 +2796,10 @@ mod tests {
             PathBuf::from(std::env::var("SP_LIVE_COMPATDATA").expect("SP_LIVE_COMPATDATA"));
         let target = LaunchTarget {
             appid: 0,
-            client_dir: steam::steam_client_dir().expect("Steam install"),
+            client_dir: steam::metadata_roots()
+                .into_iter()
+                .next()
+                .expect("Steam install"),
             compatdata_dir: compat.clone(),
             proton_dir: proton,
             sandbox: None,

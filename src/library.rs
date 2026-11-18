@@ -182,8 +182,11 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
     if !is_exe(src) {
         anyhow::bail!("{} is not a trainer .exe", src.display());
     }
-    let dir = trainers_dir()?;
-    std::fs::create_dir_all(&dir)?;
+    import_trainer_into(src, &trainers_dir()?)
+}
+
+fn import_trainer_into(src: &Path, dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
 
     let filename = src.file_name().context("dropped file has no filename")?;
     let dest = dir.join(filename);
@@ -196,12 +199,18 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
         }
     }
 
-    // Copy to a temp name and rename into place so an interrupted copy
-    // never leaves a corrupt trainer behind.
-    let mut tmp_name = dest.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-    if let Err(e) = std::fs::copy(src, &tmp).and_then(|_| std::fs::rename(&tmp, &dest)) {
+    // Copy to a temp file of this import's own and rename into place, so an
+    // interrupted copy never leaves a corrupt trainer behind and two imports of
+    // the same filename at once never write into one temp file.
+    let (tmp, file) = unique_temp(dir, filename)?;
+    let copied = std::fs::File::open(src)
+        .and_then(|mut from| {
+            let mut to = file;
+            std::io::copy(&mut from, &mut to)?;
+            to.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, &dest));
+    if let Err(e) = copied {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::Error::new(e).context(format!(
             "copying {} to {}",
@@ -210,6 +219,35 @@ pub fn import_trainer(src: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(dest)
+}
+
+/// A new, empty file in `dir` named after `filename`, created exclusively, so
+/// no other import gets the same one. Hidden and not `.exe`, so the list never
+/// shows it.
+fn unique_temp(dir: &Path, filename: &std::ffi::OsStr) -> Result<(PathBuf, std::fs::File)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(filename);
+        name.push(format!(
+            ".{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context(format!("creating {}", path.display())))
+            }
+        }
+    }
 }
 
 pub fn remove_trainer(path: &Path) -> Result<()> {
@@ -245,6 +283,39 @@ mod tests {
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn imports_of_one_filename_at_once_each_copy_whole() {
+        let dir = scratch("import");
+        let lib = dir.join("trainers");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let big_a = vec![b'a'; 4 << 20];
+        let big_b = vec![b'b'; 3 << 20];
+        std::fs::write(a.join("Game Trainer.exe"), &big_a).unwrap();
+        std::fs::write(b.join("Game Trainer.exe"), &big_b).unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let src = if i % 2 == 0 { &a } else { &b }.join("Game Trainer.exe");
+                let lib = lib.clone();
+                std::thread::spawn(move || import_trainer_into(&src, &lib))
+            })
+            .collect();
+        for t in threads {
+            let dest = t.join().unwrap().expect("every import succeeds");
+            assert_eq!(dest, lib.join("Game Trainer.exe"));
+        }
+        let copied = std::fs::read(lib.join("Game Trainer.exe")).unwrap();
+        assert!(copied == big_a || copied == big_b, "one whole copy");
+        let names: Vec<_> = std::fs::read_dir(&lib)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["Game Trainer.exe"], "no temp file is left");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

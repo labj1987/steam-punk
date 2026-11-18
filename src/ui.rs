@@ -1379,6 +1379,9 @@ struct AppIdPrompt {
     /// has to pick it.
     suggestion: Option<(u32, String)>,
     results: Vec<gamedata::SearchResult>,
+    /// The search term `results` belong to. Enter in the field only picks a result of the
+    /// text it holds now, never one left over from an earlier query.
+    results_for: Option<String>,
     /// Thumbnails by URL; each loads async and drops in once it arrives (or
     /// never, if the fetch fails — the row is still usable without it).
     thumbnails: HashMap<String, Arc<Image>>,
@@ -1408,6 +1411,32 @@ enum AppIdEnter {
     /// Anywhere else (the dialog surface, the field's clear button, the toolkit's
     /// close button, whose focus the dialog cannot see): the dialog stays open.
     Nothing,
+}
+
+/// What Enter in the AppID dialog's search field does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FieldEnter {
+    /// The field is blank: no association, as the dialog says.
+    Skip,
+    Pick(u32),
+    /// A search whose results are not in yet: nothing.
+    Wait,
+}
+
+/// `text` is the field's text, `results_for` the term the shown results were searched
+/// for and `first` the top one of them. A numeric AppID is taken as is (as Add does).
+fn field_enter(text: &str, results_for: Option<&str>, first: Option<u32>) -> FieldEnter {
+    let text = text.trim();
+    if text.is_empty() {
+        return FieldEnter::Skip;
+    }
+    if let Ok(appid) = text.parse::<u32>() {
+        return FieldEnter::Pick(appid);
+    }
+    match (results_for, first) {
+        (Some(term), Some(appid)) if term.trim() == text => FieldEnter::Pick(appid),
+        _ => FieldEnter::Wait,
+    }
 }
 
 fn appid_enter(field: bool, skip: bool, add: bool, used: Option<u32>) -> AppIdEnter {
@@ -1445,6 +1474,14 @@ impl AppIdPrompt {
             |this, input, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
                     let term = input.read(cx).value().to_string();
+                    if term.trim().is_empty() {
+                        // Nothing to search for: the old results go at once.
+                        this.results.clear();
+                        this.results_for = None;
+                        this.pending_search = None;
+                        cx.notify();
+                        return;
+                    }
                     this.pending_search = Some(cx.spawn_in(window, async move |this, cx| {
                         cx.background_executor()
                             .timer(Duration::from_millis(250))
@@ -1456,13 +1493,17 @@ impl AppIdPrompt {
                 }
                 InputEvent::PressEnter { .. } => {
                     // A raw numeric AppID takes priority (matches the Add
-                    // button's behavior); otherwise Enter picks whatever's
-                    // currently the top search result, if any.
-                    let text = input.read(cx).value();
-                    if let Ok(appid) = text.trim().parse::<u32>() {
-                        this.confirm(appid, window, cx);
-                    } else if let Some(appid) = this.results.first().map(|r| r.appid) {
-                        this.confirm(appid, window, cx);
+                    // button's behavior); otherwise Enter picks the top result of
+                    // the search for what the field holds now; a blank field skips.
+                    let text = input.read(cx).value().to_string();
+                    match field_enter(
+                        &text,
+                        this.results_for.as_deref(),
+                        this.results.first().map(|r| r.appid),
+                    ) {
+                        FieldEnter::Skip => (this.finish)(window, cx),
+                        FieldEnter::Pick(appid) => this.confirm(appid, window, cx),
+                        FieldEnter::Wait => {}
                     }
                 }
                 _ => {}
@@ -1476,6 +1517,7 @@ impl AppIdPrompt {
             input,
             suggestion: None,
             results: Vec::new(),
+            results_for: None,
             thumbnails: HashMap::new(),
             picked: false,
             finish,
@@ -1532,10 +1574,12 @@ impl AppIdPrompt {
                     match results {
                         Ok(results) => {
                             this.results = results;
+                            this.results_for = Some(term_for_check.clone());
                             this.load_thumbnails(window, cx);
                         }
                         Err(e) => {
                             this.results.clear();
+                            this.results_for = None;
                             applog::log(&format!(
                                 "gamedata: search failed for {term_for_check:?}: {e}"
                             ));
@@ -1997,7 +2041,9 @@ impl PrefixRepair {
     fn begin(prefix: PathBuf) -> Option<Self> {
         REPAIRING
             .with(|r| r.borrow_mut().insert(prefix.clone()))
-            .then_some(Self(prefix))
+            // Lazily: a guard built for a rejected attempt would be dropped at once, and
+            // its Drop would free the prefix the running setup holds.
+            .then(|| Self(prefix))
     }
 }
 
@@ -2571,6 +2617,34 @@ mod tests {
     }
 
     #[test]
+    fn enter_in_the_appid_search_field_never_picks_a_stale_result() {
+        use super::{field_enter, FieldEnter};
+        assert_eq!(field_enter("", Some("portal"), Some(400)), FieldEnter::Skip);
+        assert_eq!(
+            field_enter("   ", Some("portal"), Some(400)),
+            FieldEnter::Skip
+        );
+        assert_eq!(
+            field_enter("portal", Some("portal"), Some(400)),
+            FieldEnter::Pick(400)
+        );
+        assert_eq!(
+            field_enter("portal 2", Some("portal"), Some(400)),
+            FieldEnter::Wait,
+            "results of the previous query are not picked"
+        );
+        assert_eq!(field_enter("portal", None, Some(400)), FieldEnter::Wait);
+        assert_eq!(
+            field_enter("portal", Some("portal"), None),
+            FieldEnter::Wait
+        );
+        assert_eq!(
+            field_enter(" 620 ", Some("portal"), Some(400)),
+            FieldEnter::Pick(620)
+        );
+    }
+
+    #[test]
     fn enter_in_the_appid_dialog_presses_the_focused_button() {
         use super::{appid_enter, AppIdEnter};
         assert_eq!(appid_enter(true, false, false, None), AppIdEnter::Field);
@@ -2627,10 +2701,12 @@ mod tests {
     fn one_dotnet_setup_at_a_time_per_prefix() {
         let a = PathBuf::from("/compatdata/1/pfx");
         let first = PrefixRepair::begin(a.clone()).expect("the first setup starts");
-        assert!(
-            PrefixRepair::begin(a.clone()).is_none(),
-            "a second one on the same prefix does not"
-        );
+        for attempt in 2..5 {
+            assert!(
+                PrefixRepair::begin(a.clone()).is_none(),
+                "attempt {attempt} on the same prefix does not start while the first runs"
+            );
+        }
         let other = PrefixRepair::begin(PathBuf::from("/compatdata/2/pfx"));
         assert!(other.is_some(), "another game's prefix is independent");
         drop(first);
