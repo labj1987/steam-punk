@@ -33,7 +33,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 # The pinned winetricks download is checked against its SHA-256 (setup.rs); the version already
 # in the graph.
-sha2 = "0.10"
+sha2 = "0.11"
 
 [lints.cargo]
 unused_dependencies = "warn"
